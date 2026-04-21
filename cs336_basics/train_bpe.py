@@ -1,308 +1,329 @@
-"""CS336 Assignment 1 的 byte-level BPE 训练实现。
-
-这份实现刻意保持结构清晰，方便按训练流程理解：
-
-1. 初始化词表：包含 256 个基础字节和所有 special tokens。
-2. 用 GPT-2 的正则做 pre-tokenization。
-3. 把每个 pre-token 表示为由单字节 ``bytes`` 组成的 tuple。
-4. 统计相邻 byte pair 的频次。
-5. 反复合并当前最常见的 pair，直到达到目标词表大小。
-
-为了通过速度测试，这里最终采用了 pair 频次缓存：
-每次 merge 后，不再全量重算所有 pair，而是只增量更新受影响部分。
-"""
-
-import regex as re
-from collections import Counter
-
-
-# 作业 handout / tiktoken 中给出的 GPT-2 预分词正则。
-PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-
-# 为了提高可读性，给核心数据结构起一些类型别名。
-Word = tuple[bytes, ...]
-Pair = tuple[bytes, bytes]
-WordFreqs = Counter[Word]
-PairFreqs = Counter[Pair]
-WordPairCounts = dict[Word, Counter[Pair]]
-
-
-def init_vocab(special_tokens: list[str]) -> dict[int, bytes]:
-    """初始化 byte-level BPE 训练使用的词表。
-
-    词表一定从 256 个基础字节开始，然后把用户提供的
-    special tokens 依次追加到后面。
-    """
-
-    vocab = {i: bytes([i]) for i in range(256)}
-
-    next_id = 256
-    for token in special_tokens:
-        vocab[next_id] = token.encode("utf-8")
-        next_id += 1
-
-    return vocab
-
-
-def split_on_special_tokens(text: str, special_tokens: list[str]) -> list[str]:
-    """在预分词之前，先按 special tokens 切分原始文本。
-
-    像 ``<|endoftext|>`` 这样的 special token 表示边界，merge
-    不能跨越这些边界。因此训练时我们要先把它们从普通文本流中切开，
-    只保留它们之间的普通文本片段。
-    """
-
-    if not special_tokens:
-        return [text]
-
-    escaped = [re.escape(token) for token in special_tokens]
-    pattern = "|".join(escaped)
-    parts = re.split(pattern, text)
-
-    # 去掉前后 special token 造成的空字符串片段。
-    return [part for part in parts if part != ""]
-
-
-def pretokenize_text(text: str) -> list[str]:
-    """对一个普通文本片段应用 GPT-2 风格的预分词。"""
-
-    return re.findall(PAT, text)
-
-
-def pretoken_to_byte_tuple(token: str) -> Word:
-    """把一个 pre-token 字符串转成由单字节 token 组成的 tuple。
-
-    例如：
-        " low" -> (b" ", b"l", b"o", b"w")
-    """
-
-    token_bytes = token.encode("utf-8")
-    return tuple(bytes([b]) for b in token_bytes)
-
-
-def build_word_freqs(input_path: str, special_tokens: list[str]) -> WordFreqs:
-    """构建 BPE 训练使用的 pre-token 频次表。
-
-    key 是由字节 token 构成的 tuple，value 是它在语料中的出现次数。
-    这正是 handout 推荐的紧凑表示方式。
-    """
-
-    word_freqs: WordFreqs = Counter()
-
-    with open(input_path, "r", encoding="utf-8") as f:
-        text = f.read()
-
-    chunks = split_on_special_tokens(text, special_tokens)
-
-    for chunk in chunks:
-        for token in pretokenize_text(chunk):
-            word_freqs[pretoken_to_byte_tuple(token)] += 1
-
-    return word_freqs
-
-
-def get_pair_counts(word_freqs: WordFreqs) -> PairFreqs:
-    """朴素地统计整个当前语料状态中的相邻 pair 频次。
-
-    这个函数主要用于理解算法流程。真正优化后的训练主循环
-    不会在每一轮都重新调用它，而是使用缓存做增量更新。
-    """
-
-    pair_freqs: PairFreqs = Counter()
-
-    for word, freq in word_freqs.items():
-        for i in range(len(word) - 1):
-            pair = (word[i], word[i + 1])
-            pair_freqs[pair] += freq
-
-    return pair_freqs
-
-
-def get_best_pair(pair_counts: PairFreqs) -> Pair | None:
-    """返回当前下一轮最应该 merge 的 pair。
-
-    规则是：
-    1. 先选频次最大的 pair。
-    2. 如果频次并列，则按作业要求选择字典序更大的 pair。
-    """
-
-    if not pair_counts:
-        return None
-
-    best_pair: Pair | None = None
-    max_count = -1
-
-    for pair, freq in pair_counts.items():
-        if freq > max_count:
-            max_count = freq
-            best_pair = pair
-        elif freq == max_count and pair > best_pair:
-            best_pair = pair
-
-    return best_pair
-
-
-def merge_word(word: Word, best_pair: Pair) -> Word:
-    """对单个 word 应用一次 BPE merge。
-
-    实现方式是从左到右扫描，并进行不重叠 merge。例如：
-        (b"a", b"a", b"a") 和 pair (b"a", b"a")
-    会得到：
-        (b"aa", b"a")
-    """
-
-    merged: list[bytes] = []
-    i = 0
-    n = len(word)
-
-    while i < n:
-        if i < n - 1 and (word[i], word[i + 1]) == best_pair:
-            merged.append(word[i] + word[i + 1])
-            i += 2
-        else:
-            merged.append(word[i])
-            i += 1
-
-    return tuple(merged)
-
-
-def apply_merge(word_freqs: WordFreqs, best_pair: Pair) -> WordFreqs:
-    """朴素地把一次 merge 应用到所有 word 上。
-
-    和 ``get_pair_counts`` 一样，这个函数主要保留下来帮助理解；
-    真正用于通过速度测试的是下面的缓存增量更新版本。
-    """
-
-    new_word_freqs: WordFreqs = Counter()
-
-    for word, freq in word_freqs.items():
-        new_word = merge_word(word, best_pair)
-        new_word_freqs[new_word] += freq
-
-    return new_word_freqs
-
-
-def count_pairs_in_word(word: Word) -> Counter[Pair]:
-    """统计单个 word 内部所有相邻 pair 的局部频次。"""
-
-    local_pair_counts: Counter[Pair] = Counter()
-    for i in range(len(word) - 1):
-        local_pair_counts[(word[i], word[i + 1])] += 1
-    return local_pair_counts
-
-
-def build_pair_data(word_freqs: WordFreqs) -> tuple[WordPairCounts, PairFreqs]:
-    """为优化后的训练主循环初始化 pair 缓存数据。
-
-    返回两个对象：
-    1. ``word_pair_counts``：
-       记录每个 word 内部各个相邻 pair 的局部频次。
-    2. ``pair_freqs``：
-       记录整个语料上的全局 pair 频次，已经乘上了每个 word 的语料频次。
-    """
-
-    word_pair_counts: WordPairCounts = {}
-    pair_freqs: PairFreqs = Counter()
-
-    for word, freq in word_freqs.items():
-        local_pair_counts = count_pairs_in_word(word)
-        word_pair_counts[word] = local_pair_counts
-
-        for pair, count in local_pair_counts.items():
-            pair_freqs[pair] += count * freq
-
-    return word_pair_counts, pair_freqs
-
-
-def apply_merge_and_count_pairs(
-    word_freqs: WordFreqs,
-    word_pair_counts: WordPairCounts,
-    pair_freqs: PairFreqs,
-    best_pair: Pair,
-) -> tuple[WordFreqs, WordPairCounts, PairFreqs]:
-    """执行一次 merge，并增量更新缓存的 pair 频次。
-
-    这是相对于朴素实现最关键的优化点。
-
-    我们不再在每一轮 merge 后全量重算所有 pair，而是只更新
-    真正受 ``best_pair`` 影响的那些 word：
-
-    - 如果某个 word 不包含 ``best_pair``，就直接原样复用。
-    - 如果某个 word 包含 ``best_pair``，就：
-      1. 先从全局缓存里减掉这个旧 word 的 pair 贡献；
-      2. 对这个 word 执行 merge；
-      3. 统计 merge 后新 word 的局部 pair；
-      4. 再把新 word 的贡献加回全局缓存。
-    """
-
-    new_word_freqs: WordFreqs = Counter()
-    new_word_pair_counts: WordPairCounts = {}
-    new_pair_freqs: PairFreqs = pair_freqs.copy()
-
-    for word, freq in word_freqs.items():
-        local_pair_counts = word_pair_counts[word]
-
-        # 不受当前 best_pair 影响的 word 可以直接复用。
-        if best_pair not in local_pair_counts:
-            new_word_freqs[word] += freq
-            new_word_pair_counts[word] = local_pair_counts
-            continue
-
-        # 先把旧 word 对全局 pair 频次的贡献减掉。
-        for pair, count in local_pair_counts.items():
-            new_pair_freqs[pair] -= count * freq
-            if new_pair_freqs[pair] == 0:
-                del new_pair_freqs[pair]
-
-        # 对旧 word 做 merge，并统计新 word 的局部 pair 频次。
-        new_word = merge_word(word, best_pair)
-        new_word_freqs[new_word] += freq
-
-        # 多个旧 word 可能 merge 成同一个新 word，所以如果已经算过
-        # 这个新 word 的局部 pair 频次，就直接复用。
-        new_local_pair_counts = new_word_pair_counts.get(new_word)
-        if new_local_pair_counts is None:
-            new_local_pair_counts = count_pairs_in_word(new_word)
-            new_word_pair_counts[new_word] = new_local_pair_counts
-
-        # 再把新 word 对全局 pair 频次的贡献加回去。
-        for pair, count in new_local_pair_counts.items():
-            new_pair_freqs[pair] += count * freq
-
-    return new_word_freqs, new_word_pair_counts, new_pair_freqs
+import os
+from collections import defaultdict, Counter
+import regex as re  # type: ignore
+import json
+from tqdm import tqdm
 
 
 def train_bpe(
-    input_path: str,
-    vocab_size: int,
-    special_tokens: list[str],
-) -> tuple[dict[int, bytes], list[Pair]]:
-    """训练 byte-level BPE tokenizer，并返回 ``(vocab, merges)``。
-
-    - ``vocab``：最终的 token_id -> bytes 映射
-    - ``merges``：按创建顺序记录的 merge 列表
+    input_path: str | os.PathLike,  # 输入语料文件的路径
+    vocab_size: int,             # 目标词表大小（基础字节 + 合并 Token + 特殊 Token）
+    special_tokens: list[str],   # 需要保留的特殊 Token 列表
+) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """
+    训练字节级 BPE (Byte-Pair Encoding) 分词器。
+    
+    该函数 BPE 算法的核心流程：
+    1. 初始化词表为所有可能的字节 (0-255)。
+    2.  读取输入语料，并根据特殊 Token 进行切分，确保特殊 Token 不参与统计。
+    3. 使用 GPT-2 的预分词正则将语料库切分成单词，并统计每个单词的频率。
+    4. 迭代进行“合并”操作，直到达到目标词表大小。
+       - 合并策略：总是选择当前出现频率最高、且在字典序上最大的字节对。
+    5. 使用倒排索引优化合并过程中的频率更新，确保速度。
+    6. 将合并产生的 Token 加入词表，并最终加入特殊 Token。
+    
+    返回:
+        tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+            vocab: 训练好的词汇表，映射 Token ID -> Token 字节序列。
+            merges: BPE 合并规则列表，按生成顺序排列。
+    """
+    
+    # --- 1. 初始化基础词表 ---
+    # 词表从 0 到 255 的字节开始，这是 BPE 的基础单位。
+    vocab = {i: bytes([i]) for i in range(256)}
+    
+    # 计算需要进行的合并次数。
+    # 目标词表大小 = 基础字节数 (256) + 特殊 Token 数 + 需要新生成的 Token 数。
+    num_merges = vocab_size - 256 - len(special_tokens)
+    
+    # --- 2. 读取语料，并按特殊 Token 分割 ---
+    with open(input_path, "r", encoding="utf-8") as f:
+        text = f.read()
 
-    vocab = init_vocab(special_tokens)
-    word_freqs = build_word_freqs(input_path, special_tokens)
+    # 如果指定了特殊 Token，我们需要在开始统计之前将它们从语料中“隔离”出来。
+    # 这能防止 BPE 规则将特殊 Token（如 <|endoftext|>）拆开或与普通文本混合。
 
-    merges: list[Pair] = []
-    next_id = len(vocab)
+    """
+    For special_tokens:
+    在训练时，必须保证特殊 Token 不参与频率统计。
+    代码逻辑：
+        切割语料：在开始统计词频之前，利用正则将语料库在特殊 Token 处切开。
+        独立统计：只对切分出来的普通文本片段进行 BPE 统计。
+        最后加入：训练结束后，强制将特殊 Token 加入词表（通常放在最后），确保它们有 ID。
+    """
+    if special_tokens:
+        # 在正则中，| 表示“或”，这行代码将多个特殊 token 用 | 连接，形成一个匹配任一 token 的正则模式。
+        # 例子如下 special_tokens = ["<|endoftext|>", "<pad>", "[CLS]"]
+        # re.escape(t) 用于转义特殊字符，确保它们在正则表达式中被正确识别为字面值。例如 / 会被转义为 \/，以避免被误解为正则中的分隔符。
+        # 得到的结果是使用 | 连接的特殊 token 模式：<\|endoftext\|>|<pad>|[CLS]
+        special_regex = "|".join(re.escape(t) for t in special_tokens)
 
-    # 初始化优化版训练循环所需的 pair 缓存。
-    word_pair_counts, pair_freqs = build_pair_data(word_freqs)
 
-    while len(vocab) < vocab_size:
-        best_pair = get_best_pair(pair_freqs)
-        if best_pair is None:
+        # 使用 re.split 进行分割。关键是使用捕获组 `(...)`，这样 Special Token 本身也会被保留在结果列表中。
+        parts = re.split(f"({special_regex})", text)
+        
+        # 过滤掉从 parts 中提取出的特殊 Token 本身，只保留用于 BPE 训练的普通文本片段。
+        # text = "Hello World World<|endoftext|>Hello happy happy<|endoftext|>!"
+        # train_segments =  ['Hello World World', 'Hello happy happy', '!']
+        train_segments = [p for p in parts if p not in special_tokens]
+    else:
+        # 如果没有特殊 Token，直接使用整个语料。
+        train_segments = [text]
+
+    # --- 3. 预分词（Pre-tokenization）并统计词频 ---
+    # 使用 GPT-2 的 BPE 预分词正则表达式。
+    # GPT-2 正则表达式的作用是执行“预分词（Pre-tokenization）”。 它的规则是：
+    #   (1)不允许跨越类型合并：比如它会把字母和标点符号分开。
+    #   (2)保护空格：它通常会把单词前面的空格和单词连在一起，作为一个整体。
+    # text = "Hello World test! ..."
+    # 分割后 words = ['Hello', ' World', ' test', '!', ' ...']
+    gpt2_pat = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
+    
+    # raw_counts: 存储每个“单词”（预分词后的结果）及其出现频率。
+    # 单词被表示为字节元组，例如 "hello" -> (b'h', b'e', b'l', b'l', b'o')
+    raw_counts = Counter()
+    for segment in tqdm(train_segments, desc="Pre-tokenizing"):
+        # 对每个语料片段应用预分词正则，找到所有“单词”
+        words = gpt2_pat.findall(segment)
+        for word in words:
+            # 将单词转换为 UTF-8 字节序列，然后组成元组作为 Counter 的键, 统计这个元组出现的频次
+            """
+            对于 "Hi"：
+                word.encode("utf-8") 得到 b'Hi'。
+                for b in b'Hi' 会遍历出整数 72 和 105。
+                bytes([b]) 把整数变回单字节对象：b'H' 和 b'i'。
+                最终组成元组：(b'H', b'i')。
+            为什么必须是元组（tuple）？
+                因为 Counter 的键（key）必须是不可变的。list 不能做键，而 tuple 可以。
+
+            举例：
+                raw_counts = {
+                    (b'H', b'i'): 50,
+                    (b' ', b't', b'h', b'e', b'r', b'e'): 100,
+                    (b'!'): 50,
+                    (b'\xe4',b'\xbd',b'\xa0',b'\xe5',b'\xa5',b'\xbd'):20, # 你好
+                }
+            """
+
+            # 首先，我们把一个 word 用 UTF-8 编码成字节序列，得到每个字节对应的整数值；
+            # 然后用 bytes([b]) 把每个整数值变回单字节的 bytes 对象，这样就得到了 byte-level BPE 的初始 token。
+            # 最后使用 tuple，是因为 tuple 不可变，可以作为 dict / Counter 的 key。
+            raw_counts[tuple(bytes([b]) for b in word.encode("utf-8"))] += 1
+            
+    # --- 构建高效数据结构以支持快速合并 ---
+    # words_list: 存储每个单词的字节列表。使用 list 而不是 tuple，因为 BPE 合并会修改单词内部结构。
+    # counts_list: 存储对应单词的频率。
+    words_list = []
+    counts_list = []
+
+    # 每次从 raw_counts 里拿出一个 key-value 对；
+    # key 放进 word_tuple；
+    # value 放进 freq。
+    for word_tuple, freq in raw_counts.items():
+        words_list.append(list(word_tuple)) # 转换为 list 以便后面修改
+        counts_list.append(freq)
+
+    # defaultdict(int) 是一个“带默认初始值”的字典。当你访问一个字典中不存在的键时，它不会报错，而是自动为这个键创建一个默认值 0，而在使用普通字典进行计数时，你必须先检查键是否存在，否则会触发 KeyError。
+    # stats: 存储所有可能的相邻字节对 (pair) 及其全局出现频率。
+    # 结构：{(byte_a, byte_b): frequency}
+    stats = defaultdict(int)
+    
+    # indices: 倒排索引。存储 pair -> {包含该 pair 的单词在 words_list 中的下标集合}
+    # 这个结构是性能优化的关键，用于快速找到需要更新的单词。
+    indices = defaultdict(set)
+    
+    # --- 初始化 `stats` 和 `indices` ---
+    # 遍历所有唯一的单词
+    for idx, word in enumerate(words_list):
+        freq = counts_list[idx] # 获取该单词的出现频率
+        # 遍历单词中的所有相邻字节对
+        for i in range(len(word) - 1):
+            pair = (word[i], word[i+1])
+            stats[pair] += freq          # 累加该 pair 的全局频率
+            # 把pair对应的单词索引 idx 加入到 indices 中，表示这个单词包含这个 pair
+            indices[pair].add(idx)       # 将当前单词的索引加入该 pair 的倒排列表中
+
+            
+    merges = [] # 用于存储生成的 BPE 合并规则，按顺序记录
+
+    # --- 4. 迭代合并流程 ---
+    # 循环执行 `num_merges` 次，每次找到并应用一个最佳合并规则
+    for _ in tqdm(range(num_merges), desc="BPE merges"):
+        # 如果 `stats` 为空（所有可能的对都已合并或频率为0），则停止
+        if not stats:
             break
+            
+        # --- 4a. 寻找最佳 Pair ---
+        # 目标：找到当前 `stats` 中频率最高、且字典序最大的 Pair
+        # `max(stats.items(), key=lambda x: (x[1], x[0]))` 
+        #   - x[1] 是频率 (frequency)。max 会优先选择大的频率。
+        #   - x[0] 是 Pair (tuple of bytes)。如果频率相同，max 会比较 Pair 的字典序。
+        #     Python 对元组的比较是逐个元素进行，所以 `(b' ', b't')` 会大于 `(b' ', b'a')`。
 
+        # key=lambda x: (x[1], x[0]) 的作用是告诉 max，每个元素应该拿什么东西来比较大小。
+        # max 返回的是一个完整的 key-value 对，我们只需要 key（即最佳 Pair），所以取 [0]。
+        best_pair = max(stats.items(), key=lambda x: (x[1], x[0]))[0]
+        
+        # 如果最佳 Pair 的频率已经降到 0（可能是在之前的迭代中由于其组成部分被合并了），则停止
+        if stats[best_pair] <= 0:
+            break
+            
+        # 记录这次合并
         merges.append(best_pair)
-        vocab[next_id] = best_pair[0] + best_pair[1]
-        next_id += 1
+        # 创建新的 Token（合并后的字节序列）
+        new_token = best_pair[0] + best_pair[1]
+        
+        # --- 4b. 获取需要更新的单词 ---
+        # 使用倒排索引 `indices`，快速获取所有包含 `best_pair` 的单词的下标
+        # 必须复制一份 `relevant_indices`，因为后面的循环会修改 `indices` 和 `stats`
 
-        word_freqs, word_pair_counts, pair_freqs = apply_merge_and_count_pairs(
-            word_freqs, word_pair_counts, pair_freqs, best_pair
-        )
+        # indices[best_pair] 是一个 set，包含了所有包含 best_pair 的单词索引。
+        # 所以relevant_indices 是一个列表，包含了所有需要更新的单词在 words_list 中的索引。
+        relevant_indices = list(indices[best_pair])
+        
+        # --- 4c. 遍历并更新所有受影响的单词、统计信息和倒排索引 ---
+        # 直接找到需要更新的单词索引，避免了全局扫描，提高效率。
+        for idx in relevant_indices:
+            word = words_list[idx] # 获取单词
+            freq = counts_list[idx] # 获取单词的频率
+            
+            # 扫描当前单词，找到所有 `best_pair` 的出现位置
+            i = 0
+            while i < len(word) - 1:
+                # 检查当前位置 `i` 和 `i+1` 是否匹配 `best_pair`
+                if word[i] == best_pair[0] and word[i+1] == best_pair[1]:
+                    # --- 匹配到 `best_pair`，执行合并 ---
+                    
+                    # 1. 更新旧的邻居 Pair 的频率：
+                    #    - 左邻居：(word[i-1], word[i])
+                    if i > 0:
+                        # 我们这里更新左邻居的频率，因为合并后这个 pair 就不再存在了。
+                        prev_pair = (word[i-1], word[i])
+                        stats[prev_pair] -= freq # 频率减去该单词的频率
+                        if stats[prev_pair] == 0:
+                            # 如果全局频率降为 0，从 `stats` 中移除该 pair，避免未来错误选择
+                            """
+                            stats 字典里依然会存在这个键：{(b'x', b'y'): 0}。
+                            当训练快结束，或者剩下的所有对频率都降为 0 时，max 函数依然会扫描这些值为 0 的项。
+                            根据平局规则，如果存在多个频率为 0 的项，max 会返回其中字典序最大的那一个，这是错误的
+                            """
+                            del stats[prev_pair]
+                        # 不从 indices 中移除 idx
+                        # 因为我们后续会通过检查 `word[i]` 来确定是否真的匹配。
+                        # 频繁移除索引反而可能导致性能下降或逻辑错误。
+                        
+                    #    - 右邻居：(word[i+1], word[i+2])
+                    if i < len(word) - 2:
+                        # 我们这里处理右邻居的频率更新，因为合并后这个 pair 也不再存在了。
+                        next_pair = (word[i+1], word[i+2])
+                        stats[next_pair] -= freq
+                        if stats[next_pair] == 0:
+                            del stats[next_pair]
+                      
+                    
+                    # 2. 修改单词结构：将 (word[i], word[i+1]) 替换为 new_token
+                    word[i] = new_token     # 将第一个字节替换为新 Token
+                    del word[i+1]           # 删除第二个字节，使单词变短
+                    
+                    # 3. 添加新产生的邻居 Pair 的频率和索引
+                    #    - 新的左邻居：(word[i-1], new_token)
+                    if i > 0:
+                        new_prev = (word[i-1], word[i]) # word[i] 现在是 new_token
+                        stats[new_prev] += freq
+                        indices[new_prev].add(idx) # 添加到新 pair 的倒排索引
+                    
+                    #    - 新的右邻居：(new_token, word[i+1]) (注意：word[i+1] 是旧的 word[i+2])
+                    if i < len(word) - 1:
+                        new_next = (word[i], word[i+1])
+                        stats[new_next] += freq
+                        indices[new_next].add(idx)
+                    
+                    # 合并后，索引 i 指向的是新 Token。
+                    # i 不需要移动（i+=1），因为我们刚刚修改了 word[i] 并且删除了 word[i+1]。
+                    # 下一轮循环会检查新的 (word[i], word[i+1])，即 (new_token, old_word[i+2])
+                    # 这可以处理像 A A A -> X A 这样的情况，正确地更新新的邻居对
+                else:
+                    # 如果不匹配，正常移动到下一个位置
+                    i += 1
+        
+        # 4d. 清理：移除已完全合并的 `best_pair`
+        # 这个 pair 已经不存在于 `stats` 和 `indices` 中了
+        if best_pair in stats: del stats[best_pair]
+        if best_pair in indices: del indices[best_pair]
+
+    # --- 5. 构建最终的词表 ---
+    # 添加 BPE 合并产生的 Token，ID 从 256 开始，按合并顺序递增
+    for pair in merges:
+        new_id = len(vocab)
+        vocab[new_id] = pair[0] + pair[1]
+        
+    # 添加特殊 Token
+    for s_tok in special_tokens:
+        s_bytes = s_tok.encode("utf-8")
+        vocab[len(vocab)] = s_bytes
 
     return vocab, merges
+
+
+def bytes_to_unicode():
+    """
+    创建一个映射，将 0-255 字节映射为一组可见的 Unicode 字符。
+    这是 GPT-2 源码中的标准做法。
+    """
+    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+    cs = bs[:]
+    n = 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+    cs = [chr(n) for n in cs]
+    return dict(zip(bs, cs))
+
+
+def save_tokenizer_files(vocab, merges, out_dir):
+    os.makedirs(out_dir, exist_ok=True)
+
+    # 初始化映射表
+    byte_encoder = bytes_to_unicode()
+
+    # 词表保存
+    # 使用 byte_encoder 将 bytes 转换为可见字符串
+    json_vocab = {
+        k: "".join(byte_encoder[b] for b in v) 
+        for k, v in vocab.items()
+    }
+    with open(os.path.join(out_dir, "vocab.json"), "w", encoding="utf-8") as f:
+        json.dump(json_vocab, f, indent=4)
+    
+    # 合并规则保存
+    with open(os.path.join(out_dir, "merges.txt"), "w", encoding="utf-8") as f:
+        for p1, p2 in merges:
+            # 同样转换 p1 和 p2
+            s1 = "".join(byte_encoder[b] for b in p1)
+            s2 = "".join(byte_encoder[b] for b in p2)
+            f.write(f"{s1} {s2}\n")
+
+def main():
+    data_dir = "/data/leejt/cs336_assignment1/data"
+    input_path = os.path.join(data_dir, "TinyStoriesV2-GPT4-train.txt") # 你的原始文本路径
+    vocab_size = 10000 # 作业要求的词表大小
+    # input_path = os.path.join(data_dir, "owt_train.txt") 
+    # input_path = os.path.join(data_dir, "chinese.txt") 
+    # vocab_size = 1000 # 作业要求的词表大小
+    
+    special_tokens = ["<|endoftext|>"]
+    output_dir = os.path.join(data_dir, "TinyStoriesV2-GPT4-train")
+
+    print(f"开始训练 BPE 分词器 (目标词表大小: {vocab_size})...")
+    print("这可能需要几分钟，具体取决于你的 CPU 速度和倒排索引的效率。")
+    
+    # 调用你之前写好的逻辑
+    vocab, merges = train_bpe(input_path, vocab_size, special_tokens)
+    
+    # 保存结果
+    save_tokenizer_files(vocab, merges, output_dir)
+
+if __name__ == "__main__":
+    main()
