@@ -12,6 +12,8 @@ class BPEtokenizer:
 
         self.merges = merges
 
+        self.merge_ranks = {pair: rank for rank, pair in enumerate(merges)}
+
         self.special_tokens = special_tokens or []
 
         if self.special_tokens:
@@ -26,8 +28,8 @@ class BPEtokenizer:
         # 这是GPT-2的官方分词器使用的正则表达式模式，用于匹配文本中的不同类型的标记，包括特殊标记、单词、数字、非空白字符和空白字符。这个模式确保了在分词过程中能够正确识别和处理各种类型的文本元素。
         self.gpt2_byte_pattern = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
 
+    # 对输入的文本进行编码，也就是找到对应的 token ID 列表。输入是一个字符串，输出是一个整数列表。
     def encode(self, text: str) -> list[int]:
-
         if not text:
             # 如果输入文本为空，则返回一个空列表。
             return []
@@ -41,6 +43,10 @@ class BPEtokenizer:
         # 标记目前已经处理到输入文本的哪个位置了，初始值为0。
         last_pos = 0
 
+        if self.special_tokens_regex is None:
+            # 如果没有特殊标记的正则表达式，则直接使用 GPT-2 的字节模式正则表达式来分割输入文本，并将每个标记转换为对应的 ID，最后返回一个包含这些 ID 的列表。
+            return self._encode_text_segment(text)
+        
         # 找到text中所有的 special tokens
         for match in self.special_tokens_regex.finditer(text):
             # 取text中上次处理的位置到 special token 开始位置之间的文本
@@ -84,11 +90,8 @@ class BPEtokenizer:
                     # 扫描所有相邻的 pair
                     pair = (byte_parts[i], byte_parts[i + 1])
                     # 如果这个 pair 在 merge 当中
-                    if pair in self.merges:
-                        # 找到这个 pair 对应的优先级
-                        rank = self.merges.index(pair)
-                        # 如果这个 pair 的优先级比当前找到的 best_pair 更高（即 rank 更小），就更新 best_pair 和 min_rank。
-                        if rank < min_rank:
+                    rank = self.merge_ranks.get(pair)
+                    if rank is not None and rank < min_rank:
                             min_rank = rank
                             best_pair = pair
                 
@@ -116,3 +119,17 @@ class BPEtokenizer:
                 ids.append(self.byte_to_id[byte_part])
 
         return ids
+
+
+    # 将 token ID 列表解码回原始文本的函数，输入是一个整数列表（token_ids），输出是对应的字符串。
+    def decode(self, token_ids: Iterable[int]) -> str:
+        # 把每个 token ID 转换回对应的字节，并将这些字节存储在 byte_segment 列表中。
+        byte_segment = [self.id_to_byte[token_id] for token_id in token_ids]
+        # 把列表连接成完整的字节序列
+        full_bytes = b''.join(byte_segment)
+        # 返回完整的解码字符串列表
+        return full_bytes.decode("utf-8", errors="replace")
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterable[int]:
+       for chunk in iterable:
+            yield from self.encode(chunk)
