@@ -29,7 +29,23 @@ def run_linear(
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
 
-    raise NotImplementedError
+    from cs336_basics.nn import Linear
+
+    linear = Linear(
+        in_features=d_in,
+        out_features=d_out,
+        device=weights.device,
+        dtype=weights.dtype,
+    )
+
+    # 把权重加载到线性层中。注意，权重的形状必须与线性层的权重形状匹配。
+    # 每个 PyTorch module 都有一个 state_dict()，里面保存了这个 module 的所有参数。
+    # 把这个 weights tensor 加载到 linear 这个模块的 weight 参数里
+    linear.load_state_dict({"weight": weights})
+
+    # 注意，PyTorch 里：
+    # linear(in_features)会自动调用：linear.forward(in_features)
+    return linear(in_features)
 
 
 def run_embedding(
@@ -51,7 +67,19 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
 
-    raise NotImplementedError
+    from cs336_basics.nn import Embedding
+    
+    embedding = Embedding(
+        vocab_size=vocab_size,
+        embedding_dim=d_model,
+        device=weights.device,
+        dtype=weights.dtype,
+    )
+    
+    # 把权重加载到 embedding 这个模块的 weight 参数里
+    embedding.load_state_dict({"weight": weights})
+
+    return embedding(token_ids)
 
 
 def run_swiglu(
