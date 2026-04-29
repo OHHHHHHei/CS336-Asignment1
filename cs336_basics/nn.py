@@ -56,3 +56,119 @@ class Embedding(nn.Module):
 
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.weight[token_ids]
+    
+class RMSNorm(nn.Module):
+    def __init__(self, d_model, eps=1e-5, device=None, dtype=None):
+        super().__init__()
+        factory_kwargs = {'device': device, 'dtype': dtype}
+
+        # 必须初始化为 1，否则在训练过程中会出现数值不稳定的问题
+        # 因为 RMSNorm 的计算涉及到除以输入的均方根，如果权重初始化为 0，可能会导致除以零的情况。
+
+        self.weight = nn.Parameter(torch.ones(d_model, **factory_kwargs))
+        self.eps = eps
+
+    def forward(self, x):
+        # 计算输入 x 的均方根，保持维度不变以便后续广播
+        x_float= x.to(torch.float32)  # 确保计算均方根时使用浮点数
+
+        """
+        在 PyTorch（以及 NumPy）中，广播（Broadcasting） 是指在对两个形状不同的张量进行算术运算时，系统自动“扩展”较小张量的维度，使其与较大张量匹配的机制。
+        要使两个张量是可广播的（Broadcastable），必须满足以下核心规则：
+        核心规则：从右往左看
+            比较两个张量的形状时，要从最后一个维度（最右边）开始往前检查。对于每一对对应的维度，必须满足以下 两个条件之一：
+                1.这两个维度的值相等。
+                2.其中一个维度的值是 1。
+            如果其中一个张量的维度较少，系统会自动在它的左侧补 1，直到两者的维度数量相等，然后再按上述规则检查。
+        """
+
+        # -1 表示在最后一个维度上计算均值，keepdim=True 保持维度不变以便后续广播
+        ms = x_float.pow(2).mean(-1, keepdim=True)  # 计算均方
+        rms = torch.sqrt(ms + self.eps)  # 加上一个小的常数以避免除以零
+
+        result = x_float / rms * self.weight  # 对输入进行归一化，并乘以权重
+        # 对输入进行归一化，并乘以权重
+        return result.to(x.dtype)  # 将结果转换回输入的原始数据类型
+
+class SwiGLU(nn.Module):
+    def __init__(self, d_model, d_ff, device=None, dtype=None):
+        super().__init__()
+
+        factory_kwargs = {'device': device, 'dtype': dtype}
+        self.d_ff = d_ff
+        self.d_model = d_model
+
+        # SwiGLU 的计算涉及到两个线性变换：一个用于计算 gate（门控信号），另一个用于计算 signal（信号）
+        # 最后的输出是 gate 和 signal 的逐元素乘积，再经过一个线性变换得到最终的输出。
+        self.w1 = Linear(d_model, d_ff, **factory_kwargs)
+        self.w3 = Linear(d_model, d_ff, **factory_kwargs)
+        self.w2 = Linear(d_ff, d_model, **factory_kwargs)
+
+    def silu_fn(self, x):
+        return x * torch.sigmoid(x)
+
+    def forward(self, x):
+
+        gate = self.silu_fn(self.w1(x))
+        signal = self.w3(x)
+
+        return self.w2(gate * signal)
+
+
+class RotaryPositionEmbedding(nn.Module):
+    def __init__(self, theta, d_k, context_length, device=None):
+        """
+        初始化 RoPE 模块
+        theta: 基准频率 (通常为 10000)
+        d_k: 每个 Head 的维度 (必须是偶数)
+        context_length: 最大序列长度
+        """
+        super().__init__()
+        # d_k 是每个 Head 的维度，必须是偶数，因为 RoPE 需要将维度分成两部分来计算旋转位置编码。
+        self.d_k = d_k
+        # 计算频率 
+        # powers 是一个从 0 到 d_k/2-1 的整数序列，每个元素除以 d_k 得到一个归一化的指数值
+        # 这些指数值用于计算不同频率的正弦和余弦函数。
+        powers = torch.arange(0, d_k, 2, device=device).float() / d_k
+        freqs = 1.0 / (theta ** powers)  # 计算频率，得到一个长度为 d_k/2 的频率向量
+
+        # 标记 token 的位置，t 是一个从 0 到 context_length-1 的整数序列
+        # 表示每个 token 在序列中的位置。
+        t = torch.arange(context_length, device=device).float()
+        # 计算频率矩阵，通过外积（outer product）将位置向量 t 和频率向量 freqs 结合起来
+        # 得到一个形状为 (context_length, d_k/2) 的矩阵。
+        frqs_matrix = torch.outer(t, freqs)
+
+        self.register_buffer('cos_cached', torch.cos(frqs_matrix))
+        self.register_buffer('sin_cached', torch.sin(frqs_matrix))
+
+    def forward(self, x, token_positions):
+        """
+        x: 输入张量，形状为 (batch_size, seq_len, d_k) 是要被 RoPE 旋转的 query 或 key。
+        token_positions: 每个 token 的位置索引，形状为 (batch_size, seq_len)
+        """
+        # 从缓存中获取对应位置的 cos 和 sin 值
+        cos = self.cos_cached[token_positions]  # 形状为 (batch_size, seq_len, d_k/2)
+        sin = self.sin_cached[token_positions]  # 形状为 (batch_size, seq_len, d_k/2)
+
+        if x.ndim > cos.ndim:
+            # 如果输入张量 x 的维度比 cos 和 sin 的维度多，说明 x 可能有一个额外的 batch 维度
+            # 这种情况下，我们需要在 cos 和 sin 的前面添加一个新的维度，以便它们能够正确地广播到 x 的形状。
+            cos = cos.unsqueeze(0)  # 在第0维添加一个新的维度，变成 (1, batch_size, seq_len, d_k/2)
+            sin = sin.unsqueeze(0)  # 同上
+        
+        cos = cos.to(x.dtype)  # 确保 cos 和 sin 的数据类型与输入 x 一致
+        sin = sin.to(x.dtype)
+
+        x_even = x[..., ::2]  # 取出 x 的偶数索引维度，形状为 (batch_size, seq_len, d_k/2)
+        x_odd = x[..., 1::2]  # 取出 x 的奇数索引维度，形状为 (batch_size, seq_len, d_k/2)
+
+        # 应用 RoPE 公式进行旋转位置编码
+        x_rotated_1 = x_even * cos - x_odd * sin
+        x_rotated_2 = x_even * sin + x_odd * cos
+
+        output = torch.empty_like(x)  # 创建一个与输入 x 形状相同的空张量，用于存储旋转后的结果
+        output[..., ::2] = x_rotated_1  # 将旋转后的偶数索引维度放回输出张量的偶数索引位置
+        output[..., 1::2] = x_rotated_2  # 将旋转后的奇数索引维度放回输出张量的奇数索引位置
+
+        return output
