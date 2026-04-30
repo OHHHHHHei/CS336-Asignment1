@@ -206,3 +206,57 @@ def scaled_dot_product_attention(
     # 乘以 V 得到最后的输出
     output = torch.einsum('...qk,...kv->...qv', probs, V)
     return output
+
+
+class CasualSelfAttention(nn.Module):
+    def __init__(
+        self,
+        d_model,
+        n_heads,
+        context_length=None,
+        theta=None,
+        device=None,
+        dtype=None,
+    ):
+        super().__init__()
+
+        factory_kwargs = {'device': device, 'dtype': dtype}
+
+        self.d_model = d_model
+        self.n_heads = n_heads
+        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+        self.d_k = d_model // n_heads
+
+        # 定义线性层，用于计算 Q、K、V
+        self.w_q = Linear(d_model, d_model, **factory_kwargs)
+        self.w_k = Linear(d_model, d_model, **factory_kwargs)
+        self.w_v = Linear(d_model, d_model, **factory_kwargs)
+
+        # 输出线性层
+        self.w_o = Linear(d_model, d_model, **factory_kwargs)
+
+        if theta is not None and context_length is not None:
+            self.rope = RotaryPositionEmbedding(theta, self.d_k, context_length, device=device)
+        else:
+            self.rope = None
+
+        def forward(self, x, token_position):
+            # 计算 Q、K、V，并将它们的形状调整为 (batch_size, n_heads, seq_len, d_k)
+            q = rearrange(self.w_q(x), 'b s (h d) -> b h s d', h=self.n_heads)
+            k = rearrange(self.w_k(x), 'b s (h d) -> b h s d', h=self.n_heads)
+            v = rearrange(self.w_v(x), 'b s (h d) -> b h s d', h=self.n_heads)
+
+            if self.rope is not None:
+                if token_position is None:
+                    # 适配 token_position 的形状，确保它与 q、k 的 batch 维度和序列长度匹配
+                    batch_dims = x.shape[:-2]
+                    token_position = torch.arange(x.shape[-2], device=x.device).expand(*batch_dims, -1)
+                q = self.rope(q, token_position)
+                k = self.rope(k, token_position)
+            
+            mask = torch.tril(torch.ones(x.shape[-2], x.shape[-2], device=x.device)).bool()
+            attn_output = scaled_dot_product_attention(q, k, v, mask=mask)
+            attn_output = rearrange(attn_output, 'b h s d -> b s (h d)')
+
+            output = self.w_o(attn_output)
+            return output
