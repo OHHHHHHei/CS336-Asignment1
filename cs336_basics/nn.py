@@ -90,7 +90,11 @@ class RMSNorm(nn.Module):
         # 对输入进行归一化，并乘以权重
         return result.to(x.dtype)  # 将结果转换回输入的原始数据类型
 
+def SiLU(x: torch.Tensor) -> torch.Tensor:
+    return x * torch.sigmoid(x)
+
 class SwiGLU(nn.Module):
+    # d_ff 是前馈网络的隐藏层维度，d_model 是输入和输出的维度
     def __init__(self, d_model, d_ff, device=None, dtype=None):
         super().__init__()
 
@@ -104,12 +108,9 @@ class SwiGLU(nn.Module):
         self.w3 = Linear(d_model, d_ff, **factory_kwargs)
         self.w2 = Linear(d_ff, d_model, **factory_kwargs)
 
-    def silu_fn(self, x):
-        return x * torch.sigmoid(x)
-
     def forward(self, x):
 
-        gate = self.silu_fn(self.w1(x))
+        gate = SiLU(self.w1(x))
         signal = self.w3(x)
 
         return self.w2(gate * signal)
@@ -172,3 +173,36 @@ class RotaryPositionEmbedding(nn.Module):
         output[..., 1::2] = x_rotated_2  # 将旋转后的奇数索引维度放回输出张量的奇数索引位置
 
         return output
+
+def softmax(x, dim):
+    # 为了数值稳定性，在计算 softmax 之前，我们通常会减去输入张量 x 的最大值
+    # 这样可以防止在计算指数函数时出现数值溢出的问题。
+    x_max = x.max(dim=dim, keepdim=True).values
+    x_stable = x - x_max
+
+    exp_x = torch.exp(x_stable)
+    sum_exp_x = exp_x.sum(dim=dim, keepdim=True)
+
+    output = exp_x / sum_exp_x
+    return output
+
+# 计算缩放点积注意力的函数
+def scaled_dot_product_attention(
+    Q:torch.Tensor, 
+    K:torch.Tensor, 
+    V:torch.Tensor, 
+    mask:torch.Tensor=None
+):
+    # 取 Q 的最后一维大小
+    d_k = Q.shape[-1]
+    
+    score = torch.einsum('...qd,...kd->...qk', Q, K) / (d_k ** 0.5)
+    # 如果有 mask，就掩码
+    if mask is not None:
+        score = score.masked_fill(mask == 0, float('-inf'))
+
+    probs = softmax(score, dim=-1)
+
+    # 乘以 V 得到最后的输出
+    output = torch.einsum('...qk,...kv->...qv', probs, V)
+    return output
