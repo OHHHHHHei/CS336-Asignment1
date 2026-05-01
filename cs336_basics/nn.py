@@ -1,5 +1,7 @@
 import torch as torch
 import torch.nn as nn
+from einops import rearrange
+
 
 # 定义线性层，继承自 nn.Module
 # 线性层的作用是对输入进行线性变换，通常表示为 y = xW^T + b，其中 W 是权重矩阵，b 是偏置向量。
@@ -240,23 +242,101 @@ class CasualSelfAttention(nn.Module):
         else:
             self.rope = None
 
-        def forward(self, x, token_position):
-            # 计算 Q、K、V，并将它们的形状调整为 (batch_size, n_heads, seq_len, d_k)
-            q = rearrange(self.w_q(x), 'b s (h d) -> b h s d', h=self.n_heads)
-            k = rearrange(self.w_k(x), 'b s (h d) -> b h s d', h=self.n_heads)
-            v = rearrange(self.w_v(x), 'b s (h d) -> b h s d', h=self.n_heads)
+    def forward(self, x, token_positions=None):
+        # 计算 Q、K、V，并将它们的形状调整为 (batch_size, n_heads, seq_len, d_k)
+        q = rearrange(self.w_q(x), 'b s (h d) -> b h s d', h=self.n_heads)
+        k = rearrange(self.w_k(x), 'b s (h d) -> b h s d', h=self.n_heads)
+        v = rearrange(self.w_v(x), 'b s (h d) -> b h s d', h=self.n_heads)
 
-            if self.rope is not None:
-                if token_position is None:
-                    # 适配 token_position 的形状，确保它与 q、k 的 batch 维度和序列长度匹配
-                    batch_dims = x.shape[:-2]
-                    token_position = torch.arange(x.shape[-2], device=x.device).expand(*batch_dims, -1)
-                q = self.rope(q, token_position)
-                k = self.rope(k, token_position)
-            
-            mask = torch.tril(torch.ones(x.shape[-2], x.shape[-2], device=x.device)).bool()
-            attn_output = scaled_dot_product_attention(q, k, v, mask=mask)
-            attn_output = rearrange(attn_output, 'b h s d -> b s (h d)')
+        if self.rope is not None:
+            if token_positions is None:
+                # 适配 token_position 的形状，确保它与 q、k 的 batch 维度和序列长度匹配
+                batch_dims = x.shape[:-2]
+                token_positions = torch.arange(x.shape[-2], device=x.device).expand(*batch_dims, -1)
+            q = self.rope(q, token_positions)
+            k = self.rope(k, token_positions)
+        
+        mask = torch.tril(torch.ones(x.shape[-2], x.shape[-2], device=x.device)).bool()
+        attn_output = scaled_dot_product_attention(q, k, v, mask=mask)
+        attn_output = rearrange(attn_output, 'b h s d -> b s (h d)')
 
-            output = self.w_o(attn_output)
-            return output
+        output = self.w_o(attn_output)
+        return output
+
+class TransformerBlock(nn.Module):
+        def __init__(self, d_model: int, num_heads: int, d_ff: int, context_length: int,
+                 theta: float, device=None, dtype=None, 
+                 use_rms_norm: bool = True,
+                 norm_mode: str = "pre",   # 选项: "pre", "post"
+                 ffn_type: str = "swiglu"  # 选项: "swiglu", "silu"
+                 ):
+            super().__init__()
+            self.use_rms_norm = use_rms_norm
+            self.norm_mode = norm_mode
+            self.ffn_type = ffn_type
+
+            factory_kwargs = {'device': device, 'dtype': dtype}
+            self.attn = CasualSelfAttention(d_model, num_heads, context_length=context_length, theta=theta, **factory_kwargs)
+
+            # 初始化 Norm 层
+            if use_rms_norm:
+                self.norm1 = RMSNorm(d_model, device=device, dtype=dtype)
+                self.norm2 = RMSNorm(d_model, device=device, dtype=dtype)
+            else:
+                self.norm1 = nn.Identity()
+                self.norm2 = nn.Identity()
+
+
+            # 初始化 FFN 层
+            if ffn_type == "swiglu":
+                self.ffn = SwiGLU(d_model, d_ff, device=device, dtype=dtype)
+            elif ffn_type == "silu":
+                d_ff = 4 * d_model  # 通常情况下，SILU 的 FFN 隐藏层维度是输入维度的4倍
+                self.ffn = nn.Sequential(
+                    Linear(d_model, d_ff, device=device, dtype=dtype),
+                    nn.SiLU(),
+                    Linear(d_ff, d_model, device=device, dtype=dtype)
+                )
+            else:
+                raise ValueError(f"Unsupported ffn_type: {ffn_type}")
+
+        def forward(self, x, token_positions=None):
+            # 根据 norm_mode 决定是 Pre-Norm 还是 Post-Norm
+            if self.norm_mode == "pre":
+                # Pre-Norm: 先归一化，再计算注意力和 FFN
+                x_norm = self.norm1(x)
+                attn_output = self.attn(x_norm, token_positions=token_positions)
+                x = x + attn_output  # 残差连接
+
+                x_norm = self.norm2(x)
+                ffn_output = self.ffn(x_norm)
+                x = x + ffn_output  # 残差连接
+            elif self.norm_mode == "post":
+                # Post-Norm: 先计算注意力和 FFN，再归一化
+                attn_output = self.attn(x, token_positions=token_positions)
+                x = x + attn_output  # 残差连接
+                x = self.norm1(x)
+
+                ffn_output = self.ffn(x)
+                x = x + ffn_output  # 残差连接
+                x = self.norm2(x)
+            else:
+                raise ValueError(f"Unsupported norm_mode: {self.norm_mode}")
+
+            return x
+
+
+class TransfomerLM(nn.Module):
+    def __init__(self, vocab_size, d_model, n_heads, d_ff, context_length, theta=None, device=None, dtype=None):
+        super().__init__()
+
+        factory_kwargs = {'device': device, 'dtype': dtype}
+
+        self.token_embedding = Embedding(vocab_size, d_model, **factory_kwargs)
+        self.attention = CasualSelfAttention(d_model, n_heads, context_length=context_length, theta=theta, **factory_kwargs)
+        self.ffn = SwiGLU(d_model, d_ff, **factory_kwargs)
+
+
+
+
+

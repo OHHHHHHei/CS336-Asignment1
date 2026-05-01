@@ -176,7 +176,24 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    from cs336_basics.nn import CasualSelfAttention
+    mha = CasualSelfAttention(
+        d_model=d_model,
+        n_heads=num_heads,
+        context_length=in_features.shape[-3],
+        theta=None,  # theta won't matter since we're not using RoPE in this function
+        device=q_proj_weight.device,
+        dtype=q_proj_weight.dtype,
+    )
+
+    mha.load_state_dict({
+        "w_q.weight": q_proj_weight,
+        "w_k.weight": k_proj_weight,
+        "w_v.weight": v_proj_weight,
+        "w_o.weight": o_proj_weight,
+    }, strict=False)  # strict=False allows us to load only the weights we have, even if the module has other weights (e.g., for RoPE)
+
+    return mha(in_features, token_positions=None)
 
 
 def run_multihead_self_attention_with_rope(
@@ -216,7 +233,24 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    from cs336_basics.nn import CasualSelfAttention
+    mha_with_rope = CasualSelfAttention(
+        d_model=d_model,
+        n_heads=num_heads,
+        context_length=max_seq_len,
+        theta=theta,
+        device=q_proj_weight.device,
+        dtype=q_proj_weight.dtype,
+    )
+
+    mha_with_rope.load_state_dict({
+        "w_q.weight": q_proj_weight,
+        "w_k.weight": k_proj_weight,
+        "w_v.weight": v_proj_weight,
+        "w_o.weight": o_proj_weight,
+    }, strict=False)  # strict=False allows us to load only the weights we have, even if the module has other weights (e.g., for RoPE)
+
+    return mha_with_rope(in_features, token_positions)
 
 
 def run_rope(
@@ -321,7 +355,31 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    from cs336_basics.nn import TransformerBlock
+
+    transformer_block = TransformerBlock(
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        context_length=max_seq_len,
+        theta=theta,
+        device=in_features.device,
+        dtype=in_features.dtype,
+    )
+
+    transformer_block.load_state_dict({
+        "attn.w_q.weight": weights["attn.q_proj.weight"],
+        "attn.w_k.weight": weights["attn.k_proj.weight"],
+        "attn.w_v.weight": weights["attn.v_proj.weight"],
+        "attn.w_o.weight": weights["attn.output_proj.weight"],
+        "norm1.weight": weights["ln1.weight"],
+        "ffn.w1.weight": weights["ffn.w1.weight"],
+        "ffn.w2.weight": weights["ffn.w2.weight"],
+        "ffn.w3.weight": weights["ffn.w3.weight"],
+        "norm2.weight": weights["ln2.weight"],
+        }, strict=False)  # strict=False allows us to load only the weights we have, even if the module has other weights (e.g., for RoPE)
+    
+    return transformer_block(in_features, token_positions=None)
 
 
 def run_transformer_lm(
