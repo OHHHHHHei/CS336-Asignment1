@@ -326,15 +326,51 @@ class TransformerBlock(nn.Module):
             return x
 
 
-class TransfomerLM(nn.Module):
-    def __init__(self, vocab_size, d_model, n_heads, d_ff, context_length, theta=None, device=None, dtype=None):
+class TransformerLM(nn.Module):
+    def __init__(self, vocab_size, d_model,num_layers, n_heads, d_ff, context_length, theta, device=None, dtype=None):
         super().__init__()
 
         factory_kwargs = {'device': device, 'dtype': dtype}
 
         self.token_embedding = Embedding(vocab_size, d_model, **factory_kwargs)
-        self.attention = CasualSelfAttention(d_model, n_heads, context_length=context_length, theta=theta, **factory_kwargs)
-        self.ffn = SwiGLU(d_model, d_ff, **factory_kwargs)
+
+
+        self.layers = nn.ModuleList([
+            TransformerBlock(
+                d_model=d_model,
+                num_heads=n_heads,
+                d_ff=d_ff,
+                context_length=context_length,
+                theta=theta,
+                device=device,
+                dtype=dtype
+            )
+            for _ in range(num_layers)
+        ])
+        # 最后的输出层之前的归一化层
+        # 通常在 Transformer 模型中会在输出层之前添加一个归一化层，以帮助稳定训练过程并提高模型性能。
+        self.ln_final = RMSNorm(d_model, device=device, dtype=dtype)
+        # 输出层，将 Transformer 的输出映射到词汇表大小的维度
+        # 以便进行语言建模任务中的下一个 token 预测。
+        self.lm_head = Linear(d_model, vocab_size, device=device, dtype=dtype)
+
+    def forward(self, token_ids):
+        x = self.token_embedding(token_ids)
+
+        # 生成 token 位置索引，形状为 (batch_size, seq_len)
+        # 其中每个元素表示对应 token 在序列中的位置。
+        token_positions = torch.arange(token_ids.shape[-1], device=token_ids.device).expand(token_ids.shape[0], -1) 
+        # 将 token 位置索引传递给每个 TransformerBlock
+        # 以便在计算注意力时使用 RoPE 进行位置编码。
+        for layer in self.layers:
+            x = layer(x, token_positions=token_positions)
+        # 在所有 TransformerBlock 处理完后，先进行一次归一化
+        # 然后通过 lm_head 线性层得到最终的 logits 输出。
+        x = self.ln_final(x)
+        logits = self.lm_head(x)
+        return logits
+    
+
 
 
 
