@@ -59,6 +59,7 @@ class Embedding(nn.Module):
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.weight[token_ids]
     
+# RMSNorm 类，是一种归一化方法，类似于 LayerNorm，但只使用均方根（RMS）来进行归一化，而不使用均值。
 class RMSNorm(nn.Module):
     def __init__(self, d_model, eps=1e-5, device=None, dtype=None):
         super().__init__()
@@ -66,7 +67,6 @@ class RMSNorm(nn.Module):
 
         # 必须初始化为 1，否则在训练过程中会出现数值不稳定的问题
         # 因为 RMSNorm 的计算涉及到除以输入的均方根，如果权重初始化为 0，可能会导致除以零的情况。
-
         self.weight = nn.Parameter(torch.ones(d_model, **factory_kwargs))
         self.eps = eps
 
@@ -117,7 +117,7 @@ class SwiGLU(nn.Module):
 
         return self.w2(gate * signal)
 
-
+# RoPE（Rotary Position Embedding）是一种位置编码方法，旨在为 Transformer 模型提供位置信息，同时保持旋转不变性。
 class RotaryPositionEmbedding(nn.Module):
     def __init__(self, theta, d_k, context_length, device=None):
         """
@@ -209,7 +209,7 @@ def scaled_dot_product_attention(
     output = torch.einsum('...qk,...kv->...qv', probs, V)
     return output
 
-
+# 定义一个因果自注意力（Causal Self-Attention）模块，继承自 nn.Module
 class CasualSelfAttention(nn.Module):
     def __init__(
         self,
@@ -251,11 +251,11 @@ class CasualSelfAttention(nn.Module):
         if self.rope is not None:
             if token_positions is None:
                 # 适配 token_position 的形状，确保它与 q、k 的 batch 维度和序列长度匹配
-                batch_dims = x.shape[:-2]
+                batch_dims = x.shape[:-2] # x.shape[-2] = seq_len
                 token_positions = torch.arange(x.shape[-2], device=x.device).expand(*batch_dims, -1)
             q = self.rope(q, token_positions)
             k = self.rope(k, token_positions)
-        
+        # torch.tril 会取 lower triangular，下三角部分
         mask = torch.tril(torch.ones(x.shape[-2], x.shape[-2], device=x.device)).bool()
         attn_output = scaled_dot_product_attention(q, k, v, mask=mask)
         attn_output = rearrange(attn_output, 'b h s d -> b s (h d)')
@@ -263,6 +263,7 @@ class CasualSelfAttention(nn.Module):
         output = self.w_o(attn_output)
         return output
 
+# Transformer 块定义
 class TransformerBlock(nn.Module):
         def __init__(self, d_model: int, num_heads: int, d_ff: int, context_length: int,
                  theta: float, device=None, dtype=None, 
@@ -307,7 +308,6 @@ class TransformerBlock(nn.Module):
                 x_norm = self.norm1(x)
                 attn_output = self.attn(x_norm, token_positions=token_positions)
                 x = x + attn_output  # 残差连接
-
                 x_norm = self.norm2(x)
                 ffn_output = self.ffn(x_norm)
                 x = x + ffn_output  # 残差连接
@@ -316,7 +316,6 @@ class TransformerBlock(nn.Module):
                 attn_output = self.attn(x, token_positions=token_positions)
                 x = x + attn_output  # 残差连接
                 x = self.norm1(x)
-
                 ffn_output = self.ffn(x)
                 x = x + ffn_output  # 残差连接
                 x = self.norm2(x)
@@ -333,7 +332,6 @@ class TransformerLM(nn.Module):
         factory_kwargs = {'device': device, 'dtype': dtype}
 
         self.token_embedding = Embedding(vocab_size, d_model, **factory_kwargs)
-
 
         self.layers = nn.ModuleList([
             TransformerBlock(
@@ -371,8 +369,20 @@ class TransformerLM(nn.Module):
         return logits
     
 
+def cross_entropy_loss(logits: torch.Tensor, labels: torch.Tensor):
 
+    # logits 的形状是 (batch_size, seq_len, vocab_size)，labels 的形状是 (batch_size, seq_len)
 
+    # 找到打分最高的那个 token 的 logit，作为数值稳定性的基准
+    max_logits = logits.max(dim=-1, keepdim=True).values
+    logits_stable = logits - max_logits
 
+    log_sum_exp = torch.log(torch.exp(logits_stable).sum(dim=-1))
+
+    target_logits = logits_stable.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
+
+    loss = log_sum_exp - target_logits
+
+    return loss.mean()
 
 
