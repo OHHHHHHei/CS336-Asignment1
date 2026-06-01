@@ -117,7 +117,7 @@ class SwiGLU(nn.Module):
 
         return self.w2(gate * signal)
 
-# RoPE（Rotary Position Embedding）是一种位置编码方法，旨在为 Transformer 模型提供位置信息，同时保持旋转不变性。
+# RoPE 是一种位置编码方法，旨在为 Transformer 模型提供位置信息，同时保持旋转不变性。
 class RotaryPositionEmbedding(nn.Module):
     def __init__(self, theta, d_k, context_length, device=None):
         """
@@ -157,8 +157,8 @@ class RotaryPositionEmbedding(nn.Module):
         if x.ndim > cos.ndim:
             # 如果输入张量 x 的维度比 cos 和 sin 的维度多，说明 x 可能有一个额外的 batch 维度
             # 这种情况下，我们需要在 cos 和 sin 的前面添加一个新的维度，以便它们能够正确地广播到 x 的形状。
-            cos = cos.unsqueeze(0)  # 在第0维添加一个新的维度，变成 (1, batch_size, seq_len, d_k/2)
-            sin = sin.unsqueeze(0)  # 同上
+            cos = cos.unsqueeze(-3)
+            sin = sin.unsqueeze(-3)
         
         cos = cos.to(x.dtype)  # 确保 cos 和 sin 的数据类型与输入 x 一致
         sin = sin.to(x.dtype)
@@ -255,11 +255,20 @@ class CasualSelfAttention(nn.Module):
                 token_positions = torch.arange(x.shape[-2], device=x.device).expand(*batch_dims, -1)
             q = self.rope(q, token_positions)
             k = self.rope(k, token_positions)
-        # torch.tril 会取 lower triangular，下三角部分
-        mask = torch.tril(torch.ones(x.shape[-2], x.shape[-2], device=x.device)).bool()
-        attn_output = scaled_dot_product_attention(q, k, v, mask=mask)
-        attn_output = rearrange(attn_output, 'b h s d -> b s (h d)')
 
+        # torch.tril 会取 lower triangular，下三角部分， 也就是因果掩码
+        mask = torch.tril(torch.ones(x.shape[-2], x.shape[-2], device=x.device)).bool()
+        
+        # 计算缩放点积注意力，得到每个 token 的新的表示
+        # 形状为 (batch_size, n_heads, seq_len, d_k)
+        attn_output = scaled_dot_product_attention(q, k, v, mask=mask)
+
+        # 将多头注意力的输出重新排列回 (batch_size, seq_len, d_model) 的形状
+        # 以便通过输出线性层进行处理。
+        
+        attn_output = rearrange(attn_output, 'b h s d -> b s (h d)')
+        # 通过输出线性层得到最终的输出
+        # 形状为 (batch_size, seq_len, d_model)，这是每个 token 的新的表示。
         output = self.w_o(attn_output)
         return output
 
@@ -384,5 +393,4 @@ def cross_entropy_loss(logits: torch.Tensor, labels: torch.Tensor):
     loss = log_sum_exp - target_logits
 
     return loss.mean()
-
 
