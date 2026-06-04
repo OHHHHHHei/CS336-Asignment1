@@ -1,7 +1,11 @@
 import torch
+import time
 from cs336_basics.data import get_batch
 from cs336_basics.nn import cross_entropy_loss
-from cs336_basics.optimizer import gradient_clipping, lr_cosine_schedule, AdamW
+from cs336_basics.optimizer import gradient_clipping, lr_cosine_schedule
+from cs336_basics.serialization import save_checkpoint
+from cs336_basics.logging_utils import log_metrics, save_config
+
 
 def evaluate(model, eval_data, batch_size, context_length, num_eval_batches, device):
     # 将模型切换到评估模式，这样在评估过程中，模型的行为会有所不同
@@ -42,20 +46,18 @@ def train(
     min_learning_rate,
     warmup_iters,
     cosine_cycle_iters,
-    device
+    device,
+    checkpoint_path=None,
+    run_dir=None
     ):
     model.train()
-
+    start_time = time.time()
     losses = []
     eval_losses = []
     learning_rates = []
     # 训练 num_iters 次，每次从训练数据中获取一个批次，计算损失，反向传播梯度，并更新模型参数。
     for iteration in range(num_iters):
-        # 如果当前迭代次数是 eval_interval 的倍数，就在评估数据上评估模型的性能，并记录评估损失。
-        if iteration % eval_interval == 0:
-            eval_loss = evaluate(model, eval_data, batch_size, context_length, num_eval_batches, device)
-            eval_losses.append(eval_loss)
-            print(f"Iteration {iteration}: Eval Loss = {eval_loss:.4f}")
+      
         # 学习率调度
         lr = lr_cosine_schedule(
             iteration=iteration,
@@ -68,7 +70,7 @@ def train(
         # 通常在预热阶段逐渐增加，在余弦衰减阶段逐渐减少。
         for group in optimizer.param_groups:
             group['lr'] = lr
-
+        # 获得数据
         x, y = get_batch(
             dataset = train_data,
             batch_size = batch_size,
@@ -91,6 +93,26 @@ def train(
         losses.append(loss.item())
         # 将当前的学习率添加到 learning_rates 列表中，以便后续分析和可视化。
         learning_rates.append(lr)
+
+        # 记录当前的训练指标，包括迭代次数、训练损失、学习率和时间等信息，以便后续分析和可视化。
+        metrics = {
+            "iteration": iteration + 1,
+            "train_loss": loss.item(),
+            "learning_rate": lr,
+            "time_elapsed": time.time() - start_time
+        }
+
+        # 如果当前迭代次数是 eval_interval 的倍数，就在评估数据上评估模型的性能，并记录评估损失。
+        if (iteration + 1) % eval_interval == 0:
+            eval_loss = evaluate(model, eval_data, batch_size, context_length, num_eval_batches, device)
+            eval_losses.append((iteration + 1, eval_loss))
+            print(f"Iteration {iteration + 1}: Eval Loss = {eval_loss:.4f}")
+            metrics["eval_loss"] = eval_loss
+            if checkpoint_path is not None:
+                save_checkpoint(model, optimizer, iteration + 1, checkpoint_path)
+        # 写入日志
+        if run_dir is not None:
+            log_metrics(metrics, run_dir)
 
     return losses, learning_rates, eval_losses
 

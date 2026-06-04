@@ -1,3 +1,6 @@
+import json
+import os
+
 import regex as re
 from collections.abc import Iterable
 
@@ -25,7 +28,9 @@ class BPEtokenizer:
             self.special_tokens_regex = re.compile(special_tokens_pattern)
         else:
             self.special_tokens_regex = None
-        # 这是GPT-2的官方分词器使用的正则表达式模式，用于匹配文本中的不同类型的标记，包括特殊标记、单词、数字、非空白字符和空白字符。这个模式确保了在分词过程中能够正确识别和处理各种类型的文本元素。
+            
+        # 这是GPT-2的官方分词器使用的正则表达式模式，用于匹配文本中的不同类型的标记
+        # 包括特殊标记、单词、数字、非空白字符和空白字符。这个模式确保了在分词过程中能够正确识别和处理各种类型的文本元素。
         self.gpt2_byte_pattern = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
 
     # 对输入的文本进行编码，也就是找到对应的 token ID 列表。输入是一个字符串，输出是一个整数列表。
@@ -133,3 +138,53 @@ class BPEtokenizer:
     def encode_iterable(self, iterable: Iterable[str]) -> Iterable[int]:
        for chunk in iterable:
             yield from self.encode(chunk)
+
+
+def bytes_to_unicode() -> dict[int, str]:
+    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+    cs = bs[:]
+    n = 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+    cs = [chr(n) for n in cs]
+    return dict(zip(bs, cs))
+
+
+def load_tokenizer_files(
+    vocab_path: str | os.PathLike,
+    merges_path: str | os.PathLike,
+    special_tokens: list[str] | None = None,
+) -> BPEtokenizer:
+    byte_decoder = {v: k for k, v in bytes_to_unicode().items()}
+
+    def decode_token(token: str) -> bytes:
+        return bytes(byte_decoder[c] for c in token)
+
+    with open(vocab_path, "r", encoding="utf-8") as f:
+        json_vocab = json.load(f)
+
+    first_key = next(iter(json_vocab))
+    if first_key.isdigit():
+        vocab = {int(token_id): decode_token(token) for token_id, token in json_vocab.items()}
+    else:
+        vocab = {int(token_id): decode_token(token) for token, token_id in json_vocab.items()}
+
+    if special_tokens:
+        existing_tokens = set(vocab.values())
+        for special_token in special_tokens:
+            special_bytes = special_token.encode("utf-8")
+            if special_bytes not in existing_tokens:
+                vocab[len(vocab)] = special_bytes
+                existing_tokens.add(special_bytes)
+
+    merges = []
+    with open(merges_path, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.rstrip("\n").split()
+            if len(parts) == 2:
+                merges.append((decode_token(parts[0]), decode_token(parts[1])))
+
+    return BPEtokenizer(vocab, merges, special_tokens or [])
