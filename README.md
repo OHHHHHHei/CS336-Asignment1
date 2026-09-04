@@ -119,11 +119,13 @@ Checkpoint -> temperature/top-p generation
 
 *三组消融实验的验证集 loss 曲线。每条曲线均来自对应运行目录的 `metrics.jsonl`。*
 
-基线运行的训练 loss、验证 loss 和学习率曲线：
+### 基线训练曲线
+
+基线运行的 raw train loss、验证 loss 和学习率曲线：
 
 ![基线训练 loss、验证 loss 和学习率曲线](./outputs/tinystories_base/training_curves.svg)
 
-图中浅色曲线表示逐步训练 loss，红色曲线表示定期验证 loss。
+训练 loss 使用对数纵轴显示完整下降过程；验证 loss 和学习率分别使用独立纵轴。
 
 ## BPE 性能分析
 

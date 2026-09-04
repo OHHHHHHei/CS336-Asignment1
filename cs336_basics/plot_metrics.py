@@ -58,33 +58,47 @@ def render_training_curves(metrics: list[dict], output_dir: Path) -> None:
 
     fig, axes = plt.subplots(
         1,
-        2,
-        figsize=(10.8, 4.2),
+        3,
+        figsize=(12.6, 4.5),
         sharex=True,
     )
-    loss_ax, lr_ax = axes
+    train_ax, eval_ax, lr_ax = axes
 
-    loss_ax.plot(
+    train_ax.plot(
         steps,
         train_losses,
         color=train_color,
-        linewidth=0.75,
-        alpha=0.28,
+        linewidth=0.8,
+        alpha=0.68,
         label="Train loss (raw)",
     )
-    loss_ax.plot(
+    train_ax.scatter([steps[-1]], [train_losses[-1]], color=train_color, s=26, zorder=4)
+    train_ax.annotate(
+        f"{train_losses[-1]:.3f}",
+        xy=(steps[-1], train_losses[-1]),
+        xytext=(-8, 10),
+        textcoords="offset points",
+        color=train_color,
+        fontsize=9,
+        ha="right",
+    )
+    train_ax.set_yscale("log")
+    train_ax.set_ylabel("Train loss (log scale)")
+    train_ax.legend(frameon=False, loc="upper right", handlelength=2.4)
+
+    eval_ax.plot(
         eval_steps,
         eval_losses,
         color=eval_color,
-        linewidth=2.0,
+        linewidth=2.1,
         marker="o",
-        markersize=3.2,
+        markersize=3.4,
         markeredgewidth=0,
         label="Validation loss",
         zorder=3,
     )
-    loss_ax.scatter([eval_steps[-1]], [eval_losses[-1]], color=eval_color, s=26, zorder=4)
-    loss_ax.annotate(
+    eval_ax.scatter([eval_steps[-1]], [eval_losses[-1]], color=eval_color, s=26, zorder=4)
+    eval_ax.annotate(
         f"{eval_losses[-1]:.3f}",
         xy=(eval_steps[-1], eval_losses[-1]),
         xytext=(-8, 10),
@@ -93,8 +107,8 @@ def render_training_curves(metrics: list[dict], output_dir: Path) -> None:
         fontsize=9,
         ha="right",
     )
-    loss_ax.set_ylabel("Loss")
-    loss_ax.legend(frameon=False, loc="upper right", handlelength=2.4)
+    eval_ax.set_ylabel("Validation loss")
+    eval_ax.legend(frameon=False, loc="upper right", handlelength=2.4)
 
     lr_ax.plot(
         steps,
@@ -107,11 +121,13 @@ def render_training_curves(metrics: list[dict], output_dir: Path) -> None:
     lr_ax.annotate(
         f"{learning_rates[-1]:.1e}",
         xy=(steps[-1], learning_rates[-1]),
-        xytext=(-8, 10),
+        xytext=(-8, -10),
         textcoords="offset points",
         color=learning_rate_color,
         fontsize=9,
         ha="right",
+        va="top",
+        bbox={"facecolor": "white", "edgecolor": "none", "pad": 1.5},
     )
     lr_ax.set_ylabel(r"Learning rate ($\times 10^{-4}$)")
     lr_ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value * 1e4:.1f}"))
@@ -129,14 +145,47 @@ def render_training_curves(metrics: list[dict], output_dir: Path) -> None:
         ax.tick_params(axis="both", length=3)
         ax.set_xlabel("Training step")
 
-    loss_ax.text(0.01, 0.98, "(a)", transform=loss_ax.transAxes, va="top", fontweight="bold")
-    lr_ax.text(0.01, 0.98, "(b)", transform=lr_ax.transAxes, va="top", fontweight="bold")
-    fig.subplots_adjust(left=0.08, right=0.98, bottom=0.18, top=0.96, wspace=0.22)
+    train_ax.text(
+        0.01,
+        1.03,
+        "(a)",
+        transform=train_ax.transAxes,
+        va="bottom",
+        fontweight="bold",
+        clip_on=False,
+    )
+    eval_ax.text(
+        0.01,
+        1.03,
+        "(b)",
+        transform=eval_ax.transAxes,
+        va="bottom",
+        fontweight="bold",
+        clip_on=False,
+    )
+    lr_ax.text(
+        0.01,
+        1.03,
+        "(c)",
+        transform=lr_ax.transAxes,
+        va="bottom",
+        fontweight="bold",
+        clip_on=False,
+    )
+    fig.suptitle("Baseline Training Curves", fontsize=14, fontweight="bold", y=0.995)
+    fig.subplots_adjust(left=0.06, right=0.99, bottom=0.19, top=0.82, wspace=0.28)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     for extension in ("svg", "png"):
         output_path = output_dir / f"training_curves.{extension}"
         fig.savefig(output_path, format=extension, facecolor="white")
+        if extension == "svg":
+            # 清理 matplotlib SVG 的行尾空格，方便后续版本控制和 diff 检查。
+            svg = output_path.read_text(encoding="utf-8")
+            output_path.write_text(
+                "\n".join(line.rstrip() for line in svg.splitlines()) + "\n",
+                encoding="utf-8",
+            )
         print(f"已保存图片：{output_path}")
     plt.close(fig)
 
