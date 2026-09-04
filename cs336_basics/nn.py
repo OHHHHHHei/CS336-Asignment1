@@ -215,6 +215,45 @@ def scaled_dot_product_attention(
     output = torch.einsum('...qk,...kv->...qv', probs, V)
     return output
 
+
+class KVCache:
+    # 每层预先申请一块固定大小的 K/V 空间，生成时只写入新 token。
+    def __init__(self, batch_size, n_heads, context_length, head_dim, device=None, dtype=None):
+        self.k = torch.empty(
+            batch_size,
+            n_heads,
+            context_length,
+            head_dim,
+            device=device,
+            dtype=dtype,
+        )
+        self.v = torch.empty(
+            batch_size,
+            n_heads,
+            context_length,
+            head_dim,
+            device=device,
+            dtype=dtype,
+        )
+        self.valid_length = 0
+
+    def update(self, new_k, new_v):
+        # valid_length 表示 cache 中已经写入的有效 token 数。
+        seq_len = new_k.shape[-2]
+        start = self.valid_length
+        end = start + seq_len
+        self.k[:, :, start:end, :] = new_k
+        self.v[:, :, start:end, :] = new_v
+        self.valid_length = end
+
+    def get(self):
+        # 未写入的空间不能参与注意力计算。
+        return (
+            self.k[:, :, :self.valid_length, :],
+            self.v[:, :, :self.valid_length, :],
+        )
+
+
 # 定义一个因果自注意力（Causal Self-Attention）模块，继承自 nn.Module
 class CasualSelfAttention(nn.Module):
     def __init__(
@@ -248,7 +287,7 @@ class CasualSelfAttention(nn.Module):
         else:
             self.rope = None
 
-    def forward(self, x, token_positions=None):
+    def forward(self, x, token_positions=None, past_key_value=None, use_cache=False):
         # 计算 Q、K、V，并将它们的形状调整为 (batch_size, n_heads, seq_len, d_k)
         q = rearrange(self.w_q(x), 'b s (h d) -> b h s d', h=self.n_heads)
         k = rearrange(self.w_k(x), 'b s (h d) -> b h s d', h=self.n_heads)
@@ -262,8 +301,26 @@ class CasualSelfAttention(nn.Module):
             q = self.rope(q, token_positions)
             k = self.rope(k, token_positions)
 
-        # torch.tril 会取 lower triangular，下三角部分， 也就是因果掩码
-        mask = torch.tril(torch.ones(x.shape[-2], x.shape[-2], device=x.device)).bool()
+        # 记录写入前的长度，用于区分 prefill 和 decode 的注意力掩码。
+        past_length = 0
+        if past_key_value is not None:
+            past_length = past_key_value.valid_length
+            past_key_value.update(k, v)
+            k, v = past_key_value.get()
+
+        # prefill 需要因果掩码；单 token decode 只会看到已经写入的有效区域。
+        if past_length == 0:
+            mask = torch.tril(
+                torch.ones(x.shape[-2], k.shape[-2], device=x.device)
+            ).bool()
+        elif x.shape[-2] == 1:
+            mask = None
+        else:
+            # 支持一次写入多个新 token 时的因果关系。
+            mask = torch.ones(x.shape[-2], k.shape[-2], device=x.device).bool()
+            mask[:, past_length:] = torch.tril(
+                torch.ones(x.shape[-2], x.shape[-2], device=x.device)
+            ).bool()
         
         # 计算缩放点积注意力，得到每个 token 的新的表示
         # 形状为 (batch_size, n_heads, seq_len, d_k)
@@ -276,6 +333,9 @@ class CasualSelfAttention(nn.Module):
         # 通过输出线性层得到最终的输出
         # 形状为 (batch_size, seq_len, d_model)，这是每个 token 的新的表示。
         output = self.w_o(attn_output)
+
+        if use_cache:
+            return output, past_key_value
         return output
 
 # Transformer 块定义
@@ -316,19 +376,30 @@ class TransformerBlock(nn.Module):
             else:
                 raise ValueError(f"Unsupported ffn_type: {ffn_type}")
 
-        def forward(self, x, token_positions=None):
+        def forward(self, x, token_positions=None, past_key_value=None, use_cache=False):
+            if use_cache:
+                attn_output, present_key_value = self.attn(
+                    self.norm1(x) if self.norm_mode == "pre" else x,
+                    token_positions=token_positions,
+                    past_key_value=past_key_value,
+                    use_cache=True,
+                )
+            else:
+                attn_output = self.attn(
+                    self.norm1(x) if self.norm_mode == "pre" else x,
+                    token_positions=token_positions,
+                    past_key_value=past_key_value,
+                )
+
             # 根据 norm_mode 决定是 Pre-Norm 还是 Post-Norm
             if self.norm_mode == "pre":
                 # Pre-Norm: 先归一化，再计算注意力和 FFN
-                x_norm = self.norm1(x)
-                attn_output = self.attn(x_norm, token_positions=token_positions)
                 x = x + attn_output  # 残差连接
                 x_norm = self.norm2(x)
                 ffn_output = self.ffn(x_norm)
                 x = x + ffn_output  # 残差连接
             elif self.norm_mode == "post":
                 # Post-Norm: 先计算注意力和 FFN，再归一化
-                attn_output = self.attn(x, token_positions=token_positions)
                 x = x + attn_output  # 残差连接
                 x = self.norm1(x)
                 ffn_output = self.ffn(x)
@@ -337,6 +408,8 @@ class TransformerBlock(nn.Module):
             else:
                 raise ValueError(f"Unsupported norm_mode: {self.norm_mode}")
 
+            if use_cache:
+                return x, present_key_value
             return x
 
 
@@ -358,6 +431,10 @@ class TransformerLM(nn.Module):
         ffn_type="swiglu",
     ):
         super().__init__()
+
+        self.context_length = context_length
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
 
         factory_kwargs = {'device': device, 'dtype': dtype}
         rope_theta = theta if use_rope else None
@@ -390,20 +467,62 @@ class TransformerLM(nn.Module):
         # 以便进行语言建模任务中的下一个 token 预测。
         self.lm_head = Linear(d_model, vocab_size, device=device, dtype=dtype)
 
-    def forward(self, token_ids):
+    def forward(self, token_ids, past_key_values=None, use_cache=False):
         x = self.token_embedding(token_ids)
 
+        if past_key_values is None:
+            if use_cache:
+                past_key_values = [
+                    KVCache(
+                        batch_size=token_ids.shape[0],
+                        n_heads=self.n_heads,
+                        context_length=self.context_length,
+                        head_dim=self.head_dim,
+                        device=x.device,
+                        dtype=x.dtype,
+                    )
+                    for _ in self.layers
+                ]
+            else:
+                past_key_values = [None] * len(self.layers)
+
+        # cache 中的长度决定当前 token 在 RoPE 中的位置。
+        past_length = 0
+        if use_cache:
+            past_length = past_key_values[0].valid_length
+
         # 生成 token 位置索引，形状为 (batch_size, seq_len)
-        # 其中每个元素表示对应 token 在序列中的位置。
-        token_positions = torch.arange(token_ids.shape[-1], device=token_ids.device).expand(token_ids.shape[0], -1) 
+        token_positions = torch.arange(
+            past_length,
+            past_length + token_ids.shape[-1],
+            device=token_ids.device,
+        ).expand(token_ids.shape[0], -1)
+
+        present_key_values = []
         # 将 token 位置索引传递给每个 TransformerBlock
         # 以便在计算注意力时使用 RoPE 进行位置编码。
-        for layer in self.layers:
-            x = layer(x, token_positions=token_positions)
+        for layer, past_key_value in zip(self.layers, past_key_values):
+            if use_cache:
+                x, present_key_value = layer(
+                    x,
+                    token_positions=token_positions,
+                    past_key_value=past_key_value,
+                    use_cache=True,
+                )
+                present_key_values.append(present_key_value)
+            else:
+                x = layer(
+                    x,
+                    token_positions=token_positions,
+                    past_key_value=past_key_value,
+                )
         # 在所有 TransformerBlock 处理完后，先进行一次归一化
         # 然后通过 lm_head 线性层得到最终的 logits 输出。
         x = self.ln_final(x)
         logits = self.lm_head(x)
+
+        if use_cache:
+            return logits, present_key_values
         return logits
     
 

@@ -16,6 +16,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--no-kv-cache",
+        action="store_true",
+        help="生成时关闭 KV cache，使用全量上下文前向作为对照",
+    )
+    parser.add_argument(
         "--output-path",
         type=Path,
         default=Path("outputs/tinystories_base/generated_sample.txt"),
@@ -90,6 +95,7 @@ def main() -> None:
         top_p=args.top_p,
         eos_token_id=eos_token_id,
         device=device,
+        use_cache=not args.no_kv_cache,
     )
 
     args.output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,6 +110,7 @@ def main() -> None:
         "temperature": args.temperature,
         "top_p": args.top_p,
         "seed": args.seed,
+        "use_kv_cache": not args.no_kv_cache,
         "token_count_including_prompt": token_count,
         "output_path": str(args.output_path),
     }

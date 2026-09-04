@@ -152,6 +152,28 @@ Checkpoint -> temperature/top-p generation
 
 模型在生成 `<|endoftext|>` 后正常停止，共生成 113 个 token（包含 prompt）。完整文本保存在 [`generated_sample.txt`](./outputs/tinystories_base/generated_sample.txt)，生成设置和分析见 [`generation_report.md`](./outputs/tinystories_base/generation_report.md)。
 
+## KV cache 推理性能
+
+生成时，prompt 经过一次完整前向后保存每层注意力的 K/V。上下文窗口未满时，后续 token 只计算新 token 的 Q/K/V，并读取历史 K/V；窗口满后重新建立最近窗口的 cache。`generate.py` 默认开启 KV cache，加入 `--no-kv-cache` 可以切换到全量重算路径。
+
+基于 baseline checkpoint，在 RTX 3090 上使用 prompt `Hello, she said` 和贪心解码进行对比。每个生成长度先 warmup 2 次，再正式测量 3 次，两个路径输出的 token 序列全部一致。
+
+![KV cache 与无 cache 的推理性能对比](./outputs/tinystories_base/kv_cache_benchmark.png)
+
+| 生成 token 数 | KV cache 吞吐 (token/s) | 无 cache 吞吐 (token/s) | 总耗时加速比 |
+| ---: | ---: | ---: | ---: |
+| 16 | 259.02 | 232.30 | 1.10x |
+| 32 | 263.04 | 232.64 | 1.12x |
+| 64 | 261.17 | 232.86 | 1.12x |
+| 128 | 261.01 | 229.95 | 1.13x |
+| 192 | 261.85 | 229.39 | 1.14x |
+
+完整的 JSON 数据、PNG/PDF 图片和中文报告分别保存在 `outputs/tinystories_base/` 与 `profile_output/kv_cache_benchmark.md`。重新运行基准测试：
+
+```bash
+CUDA_VISIBLE_DEVICES=6 uv run python scripts/benchmark_kv_cache.py
+```
+
 ## 快速开始
 
 ### 环境
@@ -233,14 +255,16 @@ uv run python cs336_basics/run_generate_tinystories.py \
 │   ├── nn.py                     # Transformer LM 组件
 │   ├── optimizer.py              # AdamW、梯度裁剪、学习率调度
 │   ├── train.py                  # 训练与验证循环
-│   ├── generate.py               # temperature/top-p 生成
+│   ├── generate.py               # temperature/top-p 生成与 KV cache
 │   ├── run_train_tinystories.py  # TinyStories 训练入口
 │   └── run_generate_tinystories.py
 ├── outputs/
-│   ├── tinystories_base/         # 基线曲线、checkpoint 生成样例与报告
+│   ├── tinystories_base/         # 基线曲线、生成样例与 KV cache 性能图
 │   └── tinystories_ablations/    # 消融曲线、结果表与绘图脚本
-├── profile_output/               # BPE profile、资源测量与分析报告
-├── scripts/                      # GPU 队列运行脚本
+├── profile_output/               # BPE 与 KV cache 性能分析报告
+├── scripts/
+│   ├── benchmark_kv_cache.py     # KV cache 推理性能基准
+│   └── run_gpu6_remaining_experiments.sh
 ├── tests/                        # 单元测试与 reference snapshots
 ├── EXPERIMENT_LOG.md             # 汇总实验日志
 └── cs336_spring2025_assignment1_basics.pdf

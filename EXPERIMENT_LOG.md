@@ -113,7 +113,23 @@
 
 完整生成文本及必要的文字分析见 `outputs/tinystories_base/generation_report.md`。
 
-## 7. 局限与后续工作
+## 7. KV cache 推理性能
+
+使用 baseline 第 20,000 次迭代的 checkpoint，固定 prompt `Hello, she said`、上下文长度 256 和贪心解码，在 6 号 RTX 3090 上比较 KV cache 与每一步全量重算。每个长度 warmup 2 次、正式测量 3 次，5 个生成长度的 token 序列均一致。
+
+| 生成 token 数 | KV cache 总耗时 (ms) | 无 cache 总耗时 (ms) | KV cache decode (ms/token) | 无 cache decode (ms/token) | KV cache 吞吐 (token/s) | 无 cache 吞吐 (token/s) | 加速比 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 63.00 | 69.21 | 3.86 | 4.30 | 259.02 | 232.30 | 1.10x |
+| 32 | 123.18 | 138.12 | 3.80 | 4.30 | 263.04 | 232.64 | 1.12x |
+| 64 | 247.44 | 275.92 | 3.83 | 4.29 | 261.17 | 232.86 | 1.12x |
+| 128 | 493.51 | 558.76 | 3.83 | 4.35 | 261.01 | 229.95 | 1.13x |
+| 192 | 737.43 | 840.14 | 3.82 | 4.36 | 261.85 | 229.39 | 1.14x |
+
+在当前 17M 模型上，KV cache 的优势主要体现在后续 token 的延迟和吞吐。生成长度从 16 增加到 192 时，总耗时加速比从 1.10x 增加到 1.14x。静态 cache 路径的峰值 allocated memory 固定为 362.64 MB，无 cache 路径为 359.90--377.10 MB。
+
+原始测量结果见 `outputs/tinystories_base/kv_cache_benchmark.json`，对比图见 `outputs/tinystories_base/kv_cache_benchmark.png`，测试说明见 `profile_output/kv_cache_benchmark.md`。
+
+## 8. 局限与后续工作
 
 - 尚未进行多 seed 重复实验，因此 Post-Norm 这类差异很小的结果需要谨慎解读。
 - 学习率 sweep 仍需要一次真正发散的运行，例如继续提高 peak learning rate。

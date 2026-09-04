@@ -1,0 +1,187 @@
+{
+  "config": {
+    "checkpoint": "/data/leejt/cs336_assignment1/runs/tinystories_base/checkpoint.pt",
+    "checkpoint_iteration": 20000,
+    "prompt": "Hello, she said",
+    "prompt_tokens": 4,
+    "context_length": 256,
+    "lengths": [
+      16,
+      32,
+      64,
+      128,
+      192
+    ],
+    "warmup_runs": 2,
+    "runs": 3,
+    "device": "cuda",
+    "cache_type": "preallocated_static_kv_cache"
+  },
+  "results": [
+    {
+      "new_tokens": 16,
+      "outputs_match": true,
+      "speedup": 1.0984965619291363,
+      "kv_cache": {
+        "generated_tokens": 16.0,
+        "total_ms": 63.00278869457543,
+        "prefill_ms": 4.774918934951226,
+        "first_token_ms": 4.820410317430894,
+        "avg_token_ms": 3.9206837730792663,
+        "avg_decode_token_ms": 3.8607020034558244,
+        "decode_total_ms": 57.91053005183736,
+        "tokens_per_second": 253.95746200094052,
+        "decode_tokens_per_second": 259.0206260211384,
+        "avg_forward_ms": 3.8782745832577348,
+        "peak_allocated_mb": 362.640625,
+        "peak_reserved_mb": 390.0
+      },
+      "no_kv_cache": {
+        "generated_tokens": 16.0,
+        "total_ms": 69.20834677293897,
+        "prefill_ms": 4.317658953368664,
+        "first_token_ms": 4.361686296761036,
+        "avg_token_ms": 4.308258619857952,
+        "avg_decode_token_ms": 4.30469677473108,
+        "decode_total_ms": 64.5704516209662,
+        "tokens_per_second": 231.18620573595442,
+        "decode_tokens_per_second": 232.30449764259504,
+        "avg_forward_ms": 4.264154995325953,
+        "peak_allocated_mb": 359.896484375,
+        "peak_reserved_mb": 388.0
+      }
+    },
+    {
+      "new_tokens": 32,
+      "outputs_match": true,
+      "speedup": 1.1213162413033149,
+      "kv_cache": {
+        "generated_tokens": 32.0,
+        "total_ms": 123.17668731945257,
+        "prefill_ms": 4.750528062383334,
+        "first_token_ms": 4.793962696567178,
+        "avg_token_ms": 3.8326614982603737,
+        "avg_decode_token_ms": 3.801651782185961,
+        "decode_total_ms": 117.85120524776478,
+        "tokens_per_second": 259.7894225545094,
+        "decode_tokens_per_second": 263.04355637213325,
+        "avg_forward_ms": 3.7911295245673196,
+        "peak_allocated_mb": 362.640625,
+        "peak_reserved_mb": 390.0
+      },
+      "no_kv_cache": {
+        "generated_tokens": 32.0,
+        "total_ms": 138.12002004124224,
+        "prefill_ms": 4.283916670829058,
+        "first_token_ms": 4.3275383456299705,
+        "avg_token_ms": 4.2994717611388,
+        "avg_decode_token_ms": 4.298566387445536,
+        "decode_total_ms": 133.2555580108116,
+        "tokens_per_second": 231.69047540487966,
+        "decode_tokens_per_second": 232.64425027165709,
+        "avg_forward_ms": 4.256089213110196,
+        "peak_allocated_mb": 361.765625,
+        "peak_reserved_mb": 390.0
+      }
+    },
+    {
+      "new_tokens": 64,
+      "outputs_match": true,
+      "speedup": 1.1151148766186647,
+      "kv_cache": {
+        "generated_tokens": 64.0,
+        "total_ms": 247.44046626922986,
+        "prefill_ms": 5.1320370597143965,
+        "first_token_ms": 5.179697026809056,
+        "avg_token_ms": 3.8500674321160964,
+        "avg_decode_token_ms": 3.828962200454303,
+        "decode_total_ms": 241.2246186286211,
+        "tokens_per_second": 258.6536358418161,
+        "decode_tokens_per_second": 261.16914533676464,
+        "avg_forward_ms": 3.808299472439103,
+        "peak_allocated_mb": 362.640625,
+        "peak_reserved_mb": 390.0
+      },
+      "no_kv_cache": {
+        "generated_tokens": 64.0,
+        "total_ms": 275.9245450142771,
+        "prefill_ms": 4.274654978265365,
+        "first_token_ms": 4.317148976648848,
+        "avg_token_ms": 4.294705647528947,
+        "avg_decode_token_ms": 4.294349404209584,
+        "decode_total_ms": 270.5440124652038,
+        "tokens_per_second": 231.94804485518947,
+        "decode_tokens_per_second": 232.86476427772678,
+        "avg_forward_ms": 4.251694372214843,
+        "peak_allocated_mb": 363.6533203125,
+        "peak_reserved_mb": 390.0
+      }
+    },
+    {
+      "new_tokens": 128,
+      "outputs_match": true,
+      "speedup": 1.1322170349925336,
+      "kv_cache": {
+        "generated_tokens": 128.0,
+        "total_ms": 493.51387470960617,
+        "prefill_ms": 4.801893296341102,
+        "first_token_ms": 4.845680979390939,
+        "avg_token_ms": 3.8392275406901413,
+        "avg_decode_token_ms": 3.831302710464151,
+        "decode_total_ms": 486.57544422894716,
+        "tokens_per_second": 259.36455955783276,
+        "decode_tokens_per_second": 261.0078401493911,
+        "avg_forward_ms": 3.7976045672015366,
+        "peak_allocated_mb": 362.640625,
+        "peak_reserved_mb": 390.0
+      },
+      "no_kv_cache": {
+        "generated_tokens": 128.0,
+        "total_ms": 558.764815951387,
+        "prefill_ms": 4.314765023688476,
+        "first_token_ms": 4.358004002521436,
+        "avg_token_ms": 4.348849761906119,
+        "avg_decode_token_ms": 4.348777681271352,
+        "decode_total_ms": 552.2947655214617,
+        "tokens_per_second": 229.076822072705,
+        "decode_tokens_per_second": 229.94978434536654,
+        "avg_forward_ms": 4.30552871148393,
+        "peak_allocated_mb": 371.22119140625,
+        "peak_reserved_mb": 412.0
+      }
+    },
+    {
+      "new_tokens": 192,
+      "outputs_match": true,
+      "speedup": 1.1392836078745883,
+      "kv_cache": {
+        "generated_tokens": 192.0,
+        "total_ms": 737.4318380219241,
+        "prefill_ms": 4.819241041938464,
+        "first_token_ms": 4.8629646965612965,
+        "avg_token_ms": 3.8244516367235013,
+        "avg_decode_token_ms": 3.819014395572518,
+        "decode_total_ms": 729.431749554351,
+        "tokens_per_second": 260.3634643494734,
+        "decode_tokens_per_second": 261.84805554434786,
+        "avg_forward_ms": 3.7830442476357953,
+        "peak_allocated_mb": 362.640625,
+        "peak_reserved_mb": 390.0
+      },
+      "no_kv_cache": {
+        "generated_tokens": 192.0,
+        "total_ms": 840.1440049832066,
+        "prefill_ms": 4.314641390616695,
+        "first_token_ms": 4.358293100570639,
+        "avg_token_ms": 4.359300416480336,
+        "avg_decode_token_ms": 4.359305690385622,
+        "decode_total_ms": 832.6273868636539,
+        "tokens_per_second": 228.5326251126783,
+        "decode_tokens_per_second": 229.3947036666476,
+        "avg_forward_ms": 4.316091537071366,
+        "peak_allocated_mb": 377.1015625,
+        "peak_reserved_mb": 412.0
+      }
+    }
+  ]
+}

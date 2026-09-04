@@ -38,6 +38,20 @@ def apply_top_p(probs:torch.Tensor, top_p:float) -> torch.Tensor:
     return filtered_probs
 
 
+def sample_next_token(next_token_logits, temperature, top_p):
+    # temperature=0 时使用贪心解码，方便性能测试复现相同输出。
+    if temperature == 0:
+        return torch.argmax(next_token_logits, dim=-1, keepdim=True)
+
+    next_token_logits = next_token_logits / temperature
+    probs = softmax(next_token_logits, dim=-1)
+
+    if top_p is not None:
+        probs = apply_top_p(probs, top_p)
+
+    return torch.multinomial(probs, num_samples=1)
+
+
 def generate(
     model,
     tokenizer,
@@ -48,6 +62,7 @@ def generate(
     top_p: float | None = None,
     eos_token_id: int | None = None,
     device=None,
+    use_cache: bool = True,
 ) -> str:
     model.eval()
 
@@ -59,31 +74,27 @@ def generate(
     generated = torch.tensor([token_ids], dtype=torch.long, device=device)
 
     with torch.no_grad():
+        if not use_cache:
+            # 对照路径：每次都重新计算最近的上下文，不保存历史 K/V。
+            for _ in range(max_new_tokens):
+                input_ids = generated[:, -context_length:]
+                logits = model(input_ids)
+                next_token_id = sample_next_token(logits[:, -1, :], temperature, top_p)
+                generated = torch.cat((generated, next_token_id), dim=1)
+
+                if eos_token_id is not None and next_token_id.item() == eos_token_id:
+                    break
+
+            return tokenizer.decode(generated[0].tolist())
+
+        # prompt 只做一次完整前向，建立每层的 K/V cache。
+        input_ids = generated[:, -context_length:]
+        logits, past_key_values = model(input_ids, use_cache=True)
+
         for _ in range(max_new_tokens):
-            # 取出当前生成的序列的最后 context_length 个 token 作为输入
-            input_ids = generated[:, -context_length:]
-
-            # 前向传播，得到下一个 token 的 logits
-            logits = model(input_ids)
-
             # 取出最后一个 token 的 logits
             next_token_logits = logits[:, -1, :]
-
-            # 根据 temperature 调整 logits 的分布
-            if temperature == 0:
-                next_token_id = torch.argmax(next_token_logits, dim=-1, keepdim=True)
-            else:
-                next_token_logits = next_token_logits / temperature
-
-                # 计算概率分布
-                probs = softmax(next_token_logits, dim=-1)
-
-                # 如果设置了 top_p，则应用概率过滤
-                if top_p is not None:
-                    probs = apply_top_p(probs, top_p)
-
-                # 从概率分布中采样下一个 token 的 id
-                next_token_id = torch.multinomial(probs, num_samples=1)
+            next_token_id = sample_next_token(next_token_logits, temperature, top_p)
 
             # 将采样得到的 token id 添加到生成序列中
             generated = torch.cat((generated, next_token_id), dim=1)
@@ -91,9 +102,22 @@ def generate(
             # 如果采样到 EOS token，则停止生成
             if eos_token_id is not None and next_token_id.item() == eos_token_id:
                 break
+
+            # cache 未达到窗口上限时，只输入刚生成的 token。
+            cache_length = past_key_values[0].valid_length
+            if cache_length < context_length:
+                logits, past_key_values = model(
+                    next_token_id,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                )
+            else:
+                # 窗口已满时重新计算最近的 context_length 个 token，重置 RoPE 位置。
+                input_ids = generated[:, -context_length:]
+                logits, past_key_values = model(input_ids, use_cache=True)
     # 返回生成的文本，使用 tokenizer 解码生成的 token id 序列。
     # generated[0] 是因为 generated 的形状是 (1, seq_len)，我们只需要第一行的 token id 序列。
     return tokenizer.decode(generated[0].tolist())
 
-    
+
     
