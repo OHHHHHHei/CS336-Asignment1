@@ -1,10 +1,10 @@
 # Pretraining a Language Model from Scratch
 
-> 基于 Stanford CS336 Assignment 1 的小型 GPT 风格语言模型实现、预训练与实验研究
+> 从 byte-level BPE 到文本生成的 decoder-only language model
 
-这是一个从零构建并预训练 decoder-only language model 的实验项目。项目以 Stanford **CS336 Spring 2025 Assignment 1: Basics** 为课程基础，但展示重点从“完成作业接口”扩展到了完整的语言模型训练链路：自己实现 byte-level BPE tokenizer、Transformer language model、优化器和训练循环，在 TinyStories 上完成预训练，并通过架构消融、学习率 sweep、batch size sweep 和文本生成对模型行为进行分析。
+本项目实现并预训练了一个约 17M 参数的 decoder-only language model。训练数据为 TinyStories，训练链路包含 tokenizer 训练、数据编码、模型训练、验证、checkpoint 保存和文本生成。
 
-项目目标不是复现大规模 GPT，而是把一个 language model 从原始文本带到可生成文本的全过程拆开、实现、测量并记录清楚。
+项目参考 Stanford **CS336 Spring 2025 Assignment 1: Basics**，并记录了架构消融、学习率 sweep、batch size sweep、BPE 性能分析和生成结果。
 
 ## 项目概览
 
@@ -97,23 +97,23 @@ Checkpoint -> temperature/top-p generation
 | NoPE | 1.5091 | 4.5224 | +0.0730 |
 | SiLU FFN | 1.4582 | 4.2983 | +0.0222 |
 
-在当前配置和计算预算下，移除 RoPE 的退化最明显；移除 RMSNorm 也会损害结果。Post-Norm 与 Pre-Norm 几乎持平，但这只是当前 seed 下的观测，不代表两种结构在一般情况下等价。SwiGLU 相比普通 SiLU FFN 略有优势。
+在当前配置和计算预算下，移除 RoPE 的退化最明显；移除 RMSNorm 也会损害结果。Post-Norm 与 Pre-Norm 几乎持平，这个结果对应当前 seed 和训练预算。SwiGLU 相比普通 SiLU FFN 略有优势。
 
 ### 超参数实验
 
 | 实验维度 | 最佳已测试设置 | 最终验证集 loss | 结论 |
 | --- | --- | ---: | --- |
-| Peak learning rate | `3e-3` | **1.3171** | 在已测试范围内持续改善，但尚未跑到发散边界 |
+| Peak learning rate | `3e-3` | **1.3171** | 在已测试范围内持续改善，尚未覆盖发散边界 |
 | Batch size | `128` | **1.4007** | 是当前成功完成的最大 batch |
 | 显存上限探测 | `192` | - | 在第 1 步 OOM |
 
-学习率 sweep 的结果在测试范围内呈单调改善，但 `3e-3` 尚未发散，因此教案要求的 divergent run 仍是后续工作。Batch size sweep 固定了 optimizer steps，较大 batch 同时看到了更多训练 token，所以结果不能单独解释为 batch size 的因果影响。
+学习率 sweep 的结果在测试范围内呈单调改善。`3e-3` 尚未发散，教案要求的 divergent run 仍待补充。Batch size sweep 固定了 optimizer steps，较大 batch 同时处理了更多训练 token，这组结果无法单独估计 batch size 的影响。
 
 完整运行名称、loss、PPL、耗时和状态见 [`EXPERIMENT_LOG.md`](./EXPERIMENT_LOG.md) 与 [`ablation_results_table.md`](./outputs/tinystories_ablations/ablation_results_table.md)。
 
 ## 训练曲线
 
-下面的三联图把架构、学习率和 batch size 三组实验放在同一张图中，便于观察 loss 的下降速度和最终水平。
+三联图展示了架构、学习率和 batch size 三组实验的 loss 曲线，可以直接比较下降速度和最终水平。
 
 ![架构、学习率和 batch size 消融实验的验证集 loss 曲线](./outputs/tinystories_ablations/ablation_loss_curves.png)
 
@@ -140,7 +140,7 @@ Checkpoint -> temperature/top-p generation
 | 验证集编码后 token 数 | 5,461,210 |
 | 最长 token | ` accomplishment`，15 个 UTF-8 bytes |
 
-端到端运行中，预分词和原始计数构建约占 94% 的墙钟时间；在 merge 阶段内部，遍历 `stats` 字典选择最高频 pair 是主要热点。详细数据和分析见 [`PROFILE_REPORT.md`](./profile_output/PROFILE_REPORT.md)。
+端到端运行中，预分词和原始计数构建约占 94% 的墙钟时间；merge 阶段的主要热点是遍历 `stats` 字典选择最高频 pair。详细数据和分析见 [`PROFILE_REPORT.md`](./profile_output/PROFILE_REPORT.md)。
 
 ## 文本生成示例
 
@@ -201,7 +201,7 @@ CUDA_VISIBLE_DEVICES=0 uv run python -u cs336_basics/run_train_tinystories.py \
   --run-root /data/leejt/cs336_assignment1/runs
 ```
 
-训练过程会在 run directory 中写入 `config.json`、`metrics.jsonl` 和 `checkpoint.pt`。架构消融通过修改 `--experiment` 运行，例如：
+训练过程会在 run directory 中写入 `config.json`、`metrics.jsonl` 和 `checkpoint.pt`。架构消融使用 `--experiment` 指定，例如：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 uv run python -u cs336_basics/run_train_tinystories.py \
@@ -248,12 +248,12 @@ uv run python cs336_basics/run_generate_tinystories.py \
 
 ## 当前边界与后续计划
 
-- 当前完整实验集中在 TinyStories 和约 17M 参数的模型上，尚未形成 OpenWebText 的完整训练结果。
+- 当前完整实验集中在 TinyStories 和约 17M 参数的模型上。OpenWebText 的完整训练结果尚未加入。
 - 消融和 sweep 目前主要使用单个 seed；差异很小的结论需要多 seed 重复确认。
 - 学习率 sweep 尚未覆盖真正发散的设置。
 - Batch size 对比需要在匹配 token budget 的协议下补充，以便把 batch size 影响与训练 token 数影响分开。
 - 后续可以继续补充 OpenWebText tokenizer 对比、语言模型训练和更系统的生成质量评估。
 
-## 项目来源
+## 参考课程
 
-本项目基于 Stanford CS336 Spring 2025 Assignment 1: Basics 的课程代码结构、测试和教案发展而来。课程作业材料保留在仓库中；本 README、实验日志、分析报告和结果图用于记录本项目在此基础上的实现与实验工作。仓库许可信息见 [`LICENSE`](./LICENSE)。
+实现参考 Stanford CS336 Spring 2025 Assignment 1: Basics 的课程代码结构、测试和教案。课程 handout 保留在仓库中，实验日志、分析报告和结果图记录本项目的实现结果。仓库许可信息见 [`LICENSE`](./LICENSE)。
