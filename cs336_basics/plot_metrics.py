@@ -1,5 +1,14 @@
+from __future__ import annotations
+
 import json
 from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.ticker import FuncFormatter
 
 
 def load_metrics(path: Path) -> list[dict]:
@@ -10,80 +19,126 @@ def load_metrics(path: Path) -> list[dict]:
     return metrics
 
 
-def scale_points(xs: list[float], ys: list[float], width: int, height: int, margin: int) -> list[tuple[float, float]]:
-    x_min, x_max = min(xs), max(xs)
-    y_min, y_max = min(ys), max(ys)
-
-    if x_max == x_min:
-        x_max = x_min + 1
-    if y_max == y_min:
-        y_max = y_min + 1
-
-    points = []
-    for x, y in zip(xs, ys):
-        px = margin + (x - x_min) / (x_max - x_min) * (width - 2 * margin)
-        py = height - margin - (y - y_min) / (y_max - y_min) * (height - 2 * margin)
-        points.append((px, py))
-    return points
-
-
-def polyline(points: list[tuple[float, float]], color: str, width: float = 1.5, opacity: float = 1.0) -> str:
-    point_text = " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
-    return (
-        f'<polyline points="{point_text}" fill="none" stroke="{color}" '
-        f'stroke-width="{width}" opacity="{opacity}" />'
+def configure_plot_style() -> None:
+    matplotlib.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+            "font.size": 10,
+            "axes.labelsize": 10,
+            "xtick.labelsize": 9,
+            "ytick.labelsize": 9,
+            "legend.fontsize": 9,
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.grid": True,
+            "grid.color": "#D1D5DB",
+            "grid.linewidth": 0.6,
+            "grid.alpha": 0.65,
+            "savefig.dpi": 300,
+            "savefig.bbox": "tight",
+            "savefig.pad_inches": 0.05,
+            "svg.fonttype": "none",
+        }
     )
 
 
-def circles(points: list[tuple[float, float]], color: str, radius: float = 3.0) -> str:
-    return "\n".join(
-        f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{radius}" fill="{color}" />'
-        for x, y in points
+def render_training_curves(metrics: list[dict], output_dir: Path) -> None:
+    configure_plot_style()
+
+    steps = np.asarray([item["iteration"] for item in metrics])
+    train_losses = np.asarray([item["train_loss"] for item in metrics])
+    learning_rates = np.asarray([item["learning_rate"] for item in metrics])
+    eval_steps = np.asarray([item["iteration"] for item in metrics if "eval_loss" in item])
+    eval_losses = np.asarray([item["eval_loss"] for item in metrics if "eval_loss" in item])
+    train_color = "#0072B2"
+    eval_color = "#D55E00"
+    learning_rate_color = "#009E73"
+    grid_color = "#D1D5DB"
+
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(10.8, 4.2),
+        sharex=True,
     )
+    loss_ax, lr_ax = axes
 
+    loss_ax.plot(
+        steps,
+        train_losses,
+        color=train_color,
+        linewidth=0.75,
+        alpha=0.28,
+        label="Train loss (raw)",
+    )
+    loss_ax.plot(
+        eval_steps,
+        eval_losses,
+        color=eval_color,
+        linewidth=2.0,
+        marker="o",
+        markersize=3.2,
+        markeredgewidth=0,
+        label="Validation loss",
+        zorder=3,
+    )
+    loss_ax.scatter([eval_steps[-1]], [eval_losses[-1]], color=eval_color, s=26, zorder=4)
+    loss_ax.annotate(
+        f"{eval_losses[-1]:.3f}",
+        xy=(eval_steps[-1], eval_losses[-1]),
+        xytext=(-8, 10),
+        textcoords="offset points",
+        color=eval_color,
+        fontsize=9,
+        ha="right",
+    )
+    loss_ax.set_ylabel("Loss")
+    loss_ax.legend(frameon=False, loc="upper right", handlelength=2.4)
 
-def render_svg(
-    path: Path,
-    title: str,
-    x_label: str,
-    y_label: str,
-    series: list[dict],
-    width: int = 1000,
-    height: int = 520,
-    margin: int = 64,
-) -> None:
-    all_xs = [x for item in series for x in item["xs"]]
-    all_ys = [y for item in series for y in item["ys"]]
-    x_min, x_max = min(all_xs), max(all_xs)
-    y_min, y_max = min(all_ys), max(all_ys)
+    lr_ax.plot(
+        steps,
+        learning_rates,
+        color=learning_rate_color,
+        linewidth=2.1,
+        label="Learning rate",
+    )
+    lr_ax.scatter([steps[-1]], [learning_rates[-1]], color=learning_rate_color, s=26, zorder=4)
+    lr_ax.annotate(
+        f"{learning_rates[-1]:.1e}",
+        xy=(steps[-1], learning_rates[-1]),
+        xytext=(-8, 10),
+        textcoords="offset points",
+        color=learning_rate_color,
+        fontsize=9,
+        ha="right",
+    )
+    lr_ax.set_ylabel(r"Learning rate ($\times 10^{-4}$)")
+    lr_ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value * 1e4:.1f}"))
 
-    elements = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
-        '<rect width="100%" height="100%" fill="white" />',
-        f'<text x="{width / 2}" y="28" text-anchor="middle" font-family="Arial" font-size="22">{title}</text>',
-        f'<line x1="{margin}" y1="{height - margin}" x2="{width - margin}" y2="{height - margin}" stroke="#222" />',
-        f'<line x1="{margin}" y1="{margin}" x2="{margin}" y2="{height - margin}" stroke="#222" />',
-        f'<text x="{width / 2}" y="{height - 18}" text-anchor="middle" font-family="Arial" font-size="14">{x_label}</text>',
-        f'<text x="18" y="{height / 2}" text-anchor="middle" font-family="Arial" font-size="14" transform="rotate(-90 18 {height / 2})">{y_label}</text>',
-        f'<text x="{margin}" y="{height - margin + 24}" text-anchor="middle" font-family="Arial" font-size="12">{x_min:.0f}</text>',
-        f'<text x="{width - margin}" y="{height - margin + 24}" text-anchor="middle" font-family="Arial" font-size="12">{x_max:.0f}</text>',
-        f'<text x="{margin - 10}" y="{height - margin + 4}" text-anchor="end" font-family="Arial" font-size="12">{y_min:.4g}</text>',
-        f'<text x="{margin - 10}" y="{margin + 4}" text-anchor="end" font-family="Arial" font-size="12">{y_max:.4g}</text>',
-    ]
+    max_step = int(steps[-1])
+    x_ticks = np.linspace(0, max_step, 5, dtype=int)
+    for ax in axes:
+        ax.set_xlim(0, max_step)
+        ax.set_xticks(x_ticks)
+        ax.xaxis.set_major_formatter(
+            FuncFormatter(lambda value, _: "0" if value == 0 else f"{value / 1000:.0f}k")
+        )
+        ax.grid(True, axis="y", color=grid_color)
+        ax.grid(False, axis="x")
+        ax.tick_params(axis="both", length=3)
+        ax.set_xlabel("Training step")
 
-    legend_x = width - margin - 170
-    legend_y = margin
-    for idx, item in enumerate(series):
-        points = scale_points(item["xs"], item["ys"], width, height, margin)
-        elements.append(polyline(points, item["color"], width=item.get("width", 1.5), opacity=item.get("opacity", 1.0)))
-        if item.get("markers"):
-            elements.append(circles(points, item["color"], radius=item.get("radius", 3.0)))
-        y = legend_y + idx * 24
-        elements.append(f'<line x1="{legend_x}" y1="{y}" x2="{legend_x + 24}" y2="{y}" stroke="{item["color"]}" stroke-width="3" />')
-        elements.append(f'<text x="{legend_x + 32}" y="{y + 4}" font-family="Arial" font-size="13">{item["label"]}</text>')
+    loss_ax.text(0.01, 0.98, "(a)", transform=loss_ax.transAxes, va="top", fontweight="bold")
+    lr_ax.text(0.01, 0.98, "(b)", transform=lr_ax.transAxes, va="top", fontweight="bold")
+    fig.subplots_adjust(left=0.08, right=0.98, bottom=0.18, top=0.96, wspace=0.22)
 
-    elements.append("</svg>")
-    path.write_text("\n".join(elements), encoding="utf-8")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for extension in ("svg", "png"):
+        output_path = output_dir / f"training_curves.{extension}"
+        fig.savefig(output_path, format=extension, facecolor="white")
+        print(f"已保存图片：{output_path}")
+    plt.close(fig)
 
 
 def main() -> None:
@@ -92,36 +147,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics = load_metrics(run_dir / "metrics.jsonl")
 
-    iterations = [m["iteration"] for m in metrics]
-    train_losses = [m["train_loss"] for m in metrics]
-    learning_rates = [m["learning_rate"] for m in metrics]
-
-    eval_iterations = [m["iteration"] for m in metrics if "eval_loss" in m]
-    eval_losses = [m["eval_loss"] for m in metrics if "eval_loss" in m]
-
-    render_svg(
-        output_dir / "loss_curve.svg",
-        "TinyStories Training Loss",
-        "iteration",
-        "loss",
-        [
-            {"xs": iterations, "ys": train_losses, "label": "train loss", "color": "#2563eb", "opacity": 0.65},
-            {"xs": eval_iterations, "ys": eval_losses, "label": "eval loss", "color": "#dc2626", "width": 2.0, "markers": True},
-        ],
-    )
-
-    render_svg(
-        output_dir / "lr_curve.svg",
-        "Learning Rate Schedule",
-        "iteration",
-        "learning rate",
-        [
-            {"xs": iterations, "ys": learning_rates, "label": "learning rate", "color": "#16a34a", "width": 2.0},
-        ],
-    )
-
-    print(f"Saved {output_dir / 'loss_curve.svg'}")
-    print(f"Saved {output_dir / 'lr_curve.svg'}")
+    render_training_curves(metrics, output_dir)
 
 
 if __name__ == "__main__":

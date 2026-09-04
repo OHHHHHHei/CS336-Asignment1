@@ -121,10 +121,9 @@ Checkpoint -> temperature/top-p generation
 
 基线运行的训练 loss、验证 loss 和学习率曲线：
 
-<p align="center">
-  <img src="./outputs/tinystories_base/loss_curve.svg" alt="TinyStories baseline loss curve" width="48%" />
-  <img src="./outputs/tinystories_base/lr_curve.svg" alt="TinyStories baseline learning-rate curve" width="48%" />
-</p>
+![基线训练 loss、验证 loss 和学习率曲线](./outputs/tinystories_base/training_curves.svg)
+
+图中浅色曲线表示逐步训练 loss，红色曲线表示定期验证 loss。
 
 ## BPE 性能分析
 
