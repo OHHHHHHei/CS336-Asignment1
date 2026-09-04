@@ -1,0 +1,11 @@
+{
+  "checkpoint": "/data/leejt/cs336_assignment1/runs/tinystories_base/checkpoint.pt",
+  "checkpoint_iteration": 20000,
+  "prompt": "Hello, she said",
+  "max_new_tokens": 256,
+  "temperature": 0.8,
+  "top_p": 0.9,
+  "seed": 42,
+  "token_count_including_prompt": 113,
+  "output_path": "outputs/tinystories_base/generated_sample.txt"
+}

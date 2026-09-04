@@ -95,6 +95,12 @@ class RMSNorm(nn.Module):
 def SiLU(x: torch.Tensor) -> torch.Tensor:
     return x * torch.sigmoid(x)
 
+
+class SiLUActivation(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return SiLU(x)
+
+
 class SwiGLU(nn.Module):
     # d_ff 是前馈网络的隐藏层维度，d_model 是输入和输出的维度
     def __init__(self, d_model, d_ff, device=None, dtype=None):
@@ -304,7 +310,7 @@ class TransformerBlock(nn.Module):
                 d_ff = 4 * d_model  # 通常情况下，SILU 的 FFN 隐藏层维度是输入维度的4倍
                 self.ffn = nn.Sequential(
                     Linear(d_model, d_ff, device=device, dtype=dtype),
-                    nn.SiLU(),
+                    SiLUActivation(),
                     Linear(d_ff, d_model, device=device, dtype=dtype)
                 )
             else:
@@ -335,10 +341,26 @@ class TransformerBlock(nn.Module):
 
 
 class TransformerLM(nn.Module):
-    def __init__(self, vocab_size, d_model,num_layers, n_heads, d_ff, context_length, theta, device=None, dtype=None):
+    def __init__(
+        self,
+        vocab_size,
+        d_model,
+        num_layers,
+        n_heads,
+        d_ff,
+        context_length,
+        theta,
+        device=None,
+        dtype=None,
+        use_rms_norm=True,
+        norm_mode="pre",
+        use_rope=True,
+        ffn_type="swiglu",
+    ):
         super().__init__()
 
         factory_kwargs = {'device': device, 'dtype': dtype}
+        rope_theta = theta if use_rope else None
 
         self.token_embedding = Embedding(vocab_size, d_model, **factory_kwargs)
 
@@ -348,15 +370,22 @@ class TransformerLM(nn.Module):
                 num_heads=n_heads,
                 d_ff=d_ff,
                 context_length=context_length,
-                theta=theta,
+                theta=rope_theta,
                 device=device,
-                dtype=dtype
+                dtype=dtype,
+                use_rms_norm=use_rms_norm,
+                norm_mode=norm_mode,
+                ffn_type=ffn_type,
             )
             for _ in range(num_layers)
         ])
         # 最后的输出层之前的归一化层
         # 通常在 Transformer 模型中会在输出层之前添加一个归一化层，以帮助稳定训练过程并提高模型性能。
-        self.ln_final = RMSNorm(d_model, device=device, dtype=dtype)
+        self.ln_final = (
+            RMSNorm(d_model, device=device, dtype=dtype)
+            if use_rms_norm
+            else nn.Identity()
+        )
         # 输出层，将 Transformer 的输出映射到词汇表大小的维度
         # 以便进行语言建模任务中的下一个 token 预测。
         self.lm_head = Linear(d_model, vocab_size, device=device, dtype=dtype)
@@ -393,4 +422,3 @@ def cross_entropy_loss(logits: torch.Tensor, labels: torch.Tensor):
     loss = log_sum_exp - target_logits
 
     return loss.mean()
-
